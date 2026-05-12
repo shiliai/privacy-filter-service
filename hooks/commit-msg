@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source "$(dirname "$0")/_lib.sh"
+
+if pf_skip_active; then
+  exit 0
+fi
+
+msg_file="${1:?usage: commit-msg <message-file>}"
+
+if ! _pf_service_ready; then
+  pf_warn_once unavailable "service unavailable, skipping commit-msg redaction"
+  exit 0
+fi
+
+pf_ensure_dir
+meta_file="$(mktemp)"
+protected_file="$(mktemp)"
+redacted_file="$(mktemp)"
+final_file="$(mktemp)"
+http_meta_file="$(mktemp)"
+summary_meta_file="$(mktemp)"
+trap 'rm -f "$meta_file" "$protected_file" "$redacted_file" "$final_file" "$http_meta_file" "$summary_meta_file"' EXIT
+
+python3 - "$msg_file" "$meta_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+msg_path = Path(sys.argv[1])
+meta_path = Path(sys.argv[2])
+raw = msg_path.read_bytes()
+bom = raw.startswith(b"\xef\xbb\xbf")
+text = raw.decode("utf-8-sig")
+
+lines = text.splitlines(keepends=True)
+prefix = []
+verbose = []
+in_verbose = False
+placeholders = []
+counter = 0
+
+for line in lines:
+    if in_verbose:
+        verbose.append(line)
+        continue
+    if line.rstrip("\r\n") == "------ >8 ------":
+        in_verbose = True
+        verbose.append(line)
+        continue
+    if line.startswith("#"):
+        token = f"__PF_COMMENT_PLACEHOLDER_{counter}__"
+        newline = "\r\n" if line.endswith("\r\n") else ("\n" if line.endswith("\n") else "")
+        placeholder_line = token + newline
+        prefix.append(placeholder_line)
+        placeholders.append({"placeholder_line": placeholder_line, "line": line})
+        counter += 1
+    else:
+        prefix.append(line)
+
+protected = "".join(prefix)
+meta = {
+    "protected": protected,
+    "verbose": "".join(verbose),
+    "placeholders": placeholders,
+    "bom": bom,
+}
+meta_path.write_text(json.dumps(meta), encoding="utf-8")
+PY
+
+python3 -c 'import json, pathlib, sys; pathlib.Path(sys.argv[2]).write_text(json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))["protected"], encoding="utf-8")' "$meta_file" "$protected_file"
+
+if [ -z "$(tr -d '[:space:]' < "$protected_file")" ]; then
+  exit 0
+fi
+
+json_payload="$(python3 -c 'import json, pathlib, sys; print(json.dumps({"text": pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")}))' "$protected_file")"
+
+if ! printf '%s' "$json_payload" | pf_post_json /redact/text > "$redacted_file" 2> "$http_meta_file"; then
+  pf_warn_once redact-error "commit-msg redaction failed, message unchanged"
+  exit 0
+fi
+
+http_code="$(python3 -c 'import sys; data = sys.stdin.read().splitlines(); print(data[-1].split(":", 1)[1] if data else "0")' < "$http_meta_file")"
+if [ "$http_code" != "200" ]; then
+  pf_warn_once redact-error "commit-msg redaction failed, message unchanged"
+  exit 0
+fi
+
+python3 - "$meta_file" "$redacted_file" "$final_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+meta = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+redacted = Path(sys.argv[2]).read_text(encoding="utf-8")
+for item in meta["placeholders"]:
+    redacted = redacted.replace(item["placeholder_line"], item["line"])
+final_text = redacted + meta["verbose"]
+if meta["bom"]:
+    final_text = "\ufeff" + final_text
+Path(sys.argv[3]).write_text(final_text, encoding="utf-8")
+PY
+
+if cmp -s "$final_file" "$msg_file"; then
+  exit 0
+fi
+
+cp "$final_file" "$msg_file"
+
+json_result=""
+if json_result="$(printf '%s' "$json_payload" | pf_post_json /redact 2> "$summary_meta_file")"; then
+  summary_http_code="$(python3 -c 'import sys; data = sys.stdin.read().splitlines(); print(data[-1].split(":", 1)[1] if data else "0")' < "$summary_meta_file")"
+  if [ "$summary_http_code" != "200" ]; then
+    json_result=""
+  fi
+fi
+
+span_count=0
+by_label=""
+if [ -n "$json_result" ]; then
+  span_count="$(printf '%s' "$json_result" | python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print(0)
+    raise SystemExit(0)
+print(int(data.get("summary", {}).get("span_count", 0)))')"
+  by_label="$(printf '%s' "$json_result" | python3 -c 'import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("")
+    raise SystemExit(0)
+items = sorted(data.get("summary", {}).get("by_label", {}).items())
+print(", ".join(f"{key}:{value}" for key, value in items))')"
+fi
+
+if [ -z "$by_label" ]; then
+  printf 'commit message: %s PII spans redacted\n' "$span_count" >&2
+else
+  printf 'commit message: %s PII spans redacted (%s)\n' "$span_count" "$by_label" >&2
+fi
+
+exit 0
