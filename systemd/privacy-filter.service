@@ -1,0 +1,14 @@
+[Unit]
+Description=Privacy Filter Service (local PII redaction)
+After=default.target
+
+[Service]
+Type=exec
+ExecStart=%h/project/docker/privacy-filter-service/.venv/bin/privacy-filter-service
+Restart=on-failure
+RestartSec=5s
+EnvironmentFile=-%h/.config/privacy-filter/env
+WorkingDirectory=%h/project/docker/privacy-filter-service
+
+[Install]
+WantedBy=default.target
