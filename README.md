@@ -1,143 +1,274 @@
 # Privacy Filter Service
 
-A local FastAPI service that wraps the OPF privacy-filter model. It scans staged files and commit messages for PII before you commit, blocks the commit if anything is found, and writes a patch you can review and apply. Everything runs on your machine. No data leaves the box.
+本地 FastAPI 服务，包装 OPF (OpenAI Privacy Filter) 模型。提交代码前自动扫描暂存文件和提交信息中的 PII（个人身份信息），发现则阻止提交并生成 patch 供审查。所有推理在本地完成，数据不出机器。
 
 ---
 
-## Prerequisites
-
-| Requirement | Details |
-|-------------|---------|
-| GPU | Optional. CUDA is supported; CPU fallback works fine. |
-| Python | 3.10 or newer |
-| Package manager | [uv](https://docs.astral.sh/uv/) |
-| OPF library | Installed as an editable dependency from `file:///home/chriswang/project/docker/privacy-filter` |
-| Model checkpoint | `/mnt/LLM/OpenAI/privacy_filter` must exist |
-
----
-
-## Install
+## 快速开始
 
 ```bash
-# 1. Clone the repository
-git clone <repo-url> ~/project/docker/privacy-filter-service
+# 克隆
+git clone git@github.com:shiliai/privacy-filter-service.git ~/project/docker/privacy-filter-service
 cd ~/project/docker/privacy-filter-service
 
-# 2. Install the service (creates venv, deploys config, starts systemd user service)
+# 安装服务（创建 venv、部署配置、启动 systemd 用户服务）
 bash install/install-service.sh
 
-# 3. Install the git hooks globally
+# 安装全局 git hooks
 bash install/install-hooks.sh
 ```
 
----
-
-## Verify
-
-Check that the service is up:
+验证：
 
 ```bash
-curl -s http://127.0.0.1:8765/health | python3 -m json.tool
-curl -s http://127.0.0.1:8765/model-info | python3 -m json.tool
-```
+curl -fsS http://127.0.0.1:8765/health | jq .
+# → {"ready":true,"device":"cuda","uptime_s":...,"version":"0.1.0"}
 
-Test the pre-commit hook with a real commit:
-
-```bash
-echo "my email is alice@example.com" > test.txt
-git add test.txt
-git commit -m "test commit"
-```
-
-The hook should block the commit, print a patch path, and tell you how to apply it.
-
----
-
-## Configuration
-
-The service reads `~/.config/privacy-filter/config.toml`. It is created for you during install if it does not exist.
-
-| Section | Key | Default | Description |
-|---------|-----|---------|-------------|
-| `service` | `host` | `0.0.0.0` | Listen address |
-| `service` | `port` | `8765` | Listen port (1-65535) |
-| `service` | `device` | `cpu` | `cuda` or `cpu` |
-| `service` | `output_mode` | `redacted` | `typed` or `redacted` |
-| `service` | `decode_mode` | `viterbi` | `viterbi` or `argmax` |
-| `service` | `model_path` | *(required)* | Path to OPF checkpoint |
-| `service` | `log_level` | `INFO` | Python logging level |
-| `hook` | `base_url` | `http://127.0.0.1:8765` | Service URL the hook calls |
-| `hook` | `request_timeout_s` | `5.0` | Hook HTTP timeout (1-60) |
-| `hook` | `max_file_bytes` | `262144` | Max file size the hook sends (<= 1 MB) |
-| `hook` | `max_inflight_warns_per_5min` | `1` | Rate limit for inflight warnings |
-
-You can also override any value with environment variables. Copy `config/env.example` to `~/.config/privacy-filter/env` and uncomment the lines you need. The systemd unit loads this file automatically.
-
-Environment variable overrides are loaded from `~/.config/privacy-filter/env`.
-
----
-
-## Operate
-
-```bash
-# Start the service
-systemctl --user start privacy-filter
-
-# Stop the service
-systemctl --user stop privacy-filter
-
-# Check status
-systemctl --user status privacy-filter
-
-# Restart after config changes
-systemctl --user restart privacy-filter
-
-# Follow logs
-journalctl --user -u privacy-filter -f
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com"}'
+# → Email <PRIVATE_EMAIL>
 ```
 
 ---
 
-## Bypass
+## 工作原理
 
-Skip the hooks for a single command:
-
-```bash
-PRIVACY_FILTER_SKIP=1 git commit -m "emergency fix"
+```
+┌──────────────────────┐        HTTP POST        ┌──────────────────────────┐
+│   git pre-commit     │  ─────────────────────>  │  Privacy Filter Service  │
+│   git commit-msg     │  /redact  /redact/text   │  FastAPI + OPF model     │
+└──────────────────────┘  /redact/batch           │  单 worker :8765         │
+         │                                        └──────────────────────────┘
+         │ 阻止提交 + 生成 patch                              │
+         v                                                   v
+   .git/privacy-filter/                          /mnt/LLM/OpenAI/privacy_filter
+   redact-<ts>-<pid>.patch                       (RTX 3090 GPU)
 ```
 
-Or bypass git hooks entirely:
+**pre-commit hook**: 扫描暂存文件 → 发现 PII → 生成 `.patch` 文件 → 阻止提交 → 用户审查后 `git apply --index` 应用。
+
+**commit-msg hook**: 自动改写提交信息中的 PII（如 `alice@example.com` → `<PRIVATE_EMAIL>`）。始终 exit 0，不阻止提交。
+
+**Fail-open**: 服务不可用时，hook 打印警告并放行，不会阻塞开发流程。
+
+---
+
+## 配置
+
+配置文件: `~/.config/privacy-filter/config.toml`
+
+```toml
+[service]
+host = "0.0.0.0"           # 监听地址
+port = 8765                 # 监听端口 (1-65535)
+device = "cuda"             # "cuda" 或 "cpu"
+output_mode = "typed"       # "typed" (带标签) 或 "redacted" (折叠)
+decode_mode = "viterbi"     # "viterbi" 或 "argmax"
+model_path = ""             # 必填 — OPF 模型路径 (或设 OPF_CHECKPOINT 环境变量)
+log_level = "INFO"          # Python 日志级别
+
+[hook]
+base_url = "http://127.0.0.1:8765"  # hook 调用的服务地址
+request_timeout_s = 5.0             # hook HTTP 超时 (1-60 秒)
+max_file_bytes = 262144             # hook 发送的最大文件大小 (≤ 1MB)
+max_inflight_warns_per_5min = 1     # 警告频率限制
+```
+
+### 环境变量覆盖
+
+任何配置项都可通过环境变量覆盖。复制 `config/env.example` 到 `~/.config/privacy-filter/env`，取消注释需要的行。systemd unit 自动加载此文件。
+
+| 环境变量 | 对应配置项 | 类型 |
+|---------|-----------|------|
+| `PRIVACY_FILTER_LISTEN_HOST` | `service.host` | str |
+| `PRIVACY_FILTER_LISTEN_PORT` | `service.port` | int |
+| `PRIVACY_FILTER_DEVICE` | `service.device` | str |
+| `PRIVACY_FILTER_OUTPUT_MODE` | `service.output_mode` | str |
+| `PRIVACY_FILTER_DECODE_MODE` | `service.decode_mode` | str |
+| `PRIVACY_FILTER_MODEL_PATH` | `service.model_path` | str |
+| `PRIVACY_FILTER_LOG_LEVEL` | `service.log_level` | str |
+| `PRIVACY_FILTER_URL` | `hook.base_url` | str |
+| `PRIVACY_FILTER_TIMEOUT_S` | `hook.request_timeout_s` | float |
+| `PRIVACY_FILTER_MAX_FILE_BYTES` | `hook.max_file_bytes` | int |
+| `OPF_CHECKPOINT` | `service.model_path` (后备) | str |
+
+加载优先级: TOML → `PRIVACY_FILTER_*` 环境变量 → `OPF_CHECKPOINT` 后备。
+
+---
+
+## 服务管理
 
 ```bash
-git commit --no-verify -m "emergency fix"
+systemctl --user start privacy-filter      # 启动
+systemctl --user stop privacy-filter       # 停止
+systemctl --user restart privacy-filter    # 重启（改配置后）
+systemctl --user status privacy-filter     # 状态
+journalctl --user -u privacy-filter -f     # 跟踪日志
+journalctl --user -u privacy-filter --since '5 minutes ago'  # 最近日志
+```
+
+开机自启（可选）:
+
+```bash
+loginctl enable-linger $USER
 ```
 
 ---
 
-## Troubleshooting
+## API
 
-### Service won't start
+### GET /health
 
-Run `journalctl --user -u privacy-filter -n 50` and look for:
+```bash
+curl -fsS http://127.0.0.1:8765/health
+```
 
-- **Model directory not found** — make sure `/mnt/LLM/OpenAI/privacy_filter` exists.
-- **CUDA requested but not available** — switch to `device = "cpu"` in `~/.config/privacy-filter/config.toml`.
-- **Config file not found** — the install script should create it. Run `install/install-service.sh` again if needed.
+```json
+{"ready": true, "device": "cuda", "uptime_s": 42.15, "version": "0.1.0"}
+```
 
-### Hook collisions
+服务启动期间（模型加载约 20s）返回 503 + `{"ready": false}`。
 
-If you already use Husky, pre-commit, or Lefthook in some repos, the global `core.hooksPath` may override per-repo hooks. The installer warns you when it detects these tools. You have two options:
+### GET /model-info
 
-1. Run `install/install-hooks.sh --force` to back up the old path and switch.
-2. Skip the privacy-filter hook in those repos with `PRIVACY_FILTER_SKIP=1`.
+```bash
+curl -fsS http://127.0.0.1:8765/model-info
+```
 
-### Fail-open warnings
+```json
+{
+  "device": "cuda",
+  "labels": ["account_number", "private_address", "private_email", "private_person", "private_phone", "private_url", "private_date", "secret"],
+  "output_mode": "typed",
+  "decode_mode": "viterbi",
+  "version": "0.1.0"
+}
+```
 
-If the service is down or not ready, the hook prints a warning and allows the commit. This is intentional so a broken service does not block your work. Check `journalctl` to see why the service is unhealthy.
+注意: 响应不包含 `model_path`（安全考虑）。
 
-### Partial-staging error
+### POST /redact
 
-The hook does not support partially staged files. If a file has both staged and unstaged changes, the commit is rejected with:
+返回完整结构化结果（含检测到的 span）。
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8765/redact \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com or call 555-123-4567"}'
+```
+
+```json
+{
+  "text": "Email alice@example.com or call 555-123-4567",
+  "redacted_text": "Email <PRIVATE_EMAIL> or call <PRIVATE_PHONE>",
+  "detected_spans": [
+    {"label": "private_email", "start": 6, "end": 23, "text": "alice@example.com", "placeholder": "<PRIVATE_EMAIL>"},
+    {"label": "private_phone", "start": 32, "end": 44, "text": "555-123-4567", "placeholder": "<PRIVATE_PHONE>"}
+  ],
+  "summary": {"output_mode": "typed", "span_count": 2, "by_label": {"private_email": 1, "private_phone": 1}, "decoded_mismatch": false},
+  "schema_version": 1,
+  "warning": null
+}
+```
+
+### POST /redact/text
+
+只返回脱敏后的纯文本。Hook 使用此端点。
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Alice was born 1990-01-02"}'
+```
+
+```
+<PRIVATE_PERSON> was born <PRIVATE_DATE>
+```
+
+### POST /redact/batch
+
+批量处理，返回结果数组（顺序与输入一致）。最多 100 条。
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8765/redact/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"texts":["Hello","alice@example.com","555-123-4567"]}'
+```
+
+### 错误码
+
+| 状态码 | 含义 | 场景 |
+|--------|------|------|
+| 200 | 成功 | 正常 |
+| 413 | 超大 | 文本 > max_file_bytes 或 batch > 100 |
+| 422 | 验证失败 | JSON 格式错误、缺少字段 |
+| 503 | 未就绪 | 模型加载中 |
+
+---
+
+## PII 标签
+
+模型检测并脱敏以下 8 类 PII:
+
+| 标签 | 说明 | 示例 |
+|------|------|------|
+| `account_number` | 银行/账号 | `1234567890` |
+| `private_address` | 物理地址 | `123 Main St, Springfield` |
+| `private_email` | 邮箱 | `alice@example.com` |
+| `private_person` | 人名 | `Alice Smith` |
+| `private_phone` | 电话 | `555-123-4567` |
+| `private_url` | URL | `https://example.com/profile` |
+| `private_date` | 日期（生日等） | `1990-01-02` |
+| `secret` | 密钥、密码 | `sk-abc123...` |
+
+---
+
+## 跳过检查
+
+单次跳过:
+
+```bash
+PRIVACY_FILTER_SKIP=1 git commit -m "紧急修复"
+```
+
+完全绕过 git hooks:
+
+```bash
+git commit --no-verify -m "紧急修复"
+```
+
+---
+
+## 故障排除
+
+### 服务启动失败
+
+```bash
+journalctl --user -u privacy-filter -n 50
+```
+
+常见原因:
+- **模型目录不存在** — 确认 `/mnt/LLM/OpenAI/privacy_filter` 存在
+- **CUDA 不可用** — 改 `device = "cpu"` 或检查 GPU 驱动
+- **配置文件不存在** — 重新运行 `install/install-service.sh`
+
+### Hook 冲突
+
+如果某些仓库已使用 Husky、pre-commit 或 Lefthook，全局 `core.hooksPath` 会覆盖它们的 hooks。解决方案:
+
+```bash
+install/install-hooks.sh --force   # 备份旧路径并切换
+PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
+```
+
+### Fail-open 警告
+
+服务不可用时，hook 打印警告并放行提交。这是设计行为，不会阻塞你的工作。检查 `journalctl` 了解原因。
+
+### Partial staging 错误
+
+不支持部分暂存的文件。如果文件同时有暂存和未暂存的更改:
 
 ```
 Partial staging not supported in v1. Either fully stage (git add <file>) or unstage (git restore --staged <file>).
@@ -145,56 +276,49 @@ Partial staging not supported in v1. Either fully stage (git add <file>) or unst
 
 ---
 
-## Known Limitations
+## 已知限制
 
-- **UTF-8 only** — Files are checked with `file --mime-encoding`. Anything that is not `utf-8` or `us-ascii` is skipped.
-- **No partial staging** — You must fully stage or fully unstage a file.
-- **No IDE or GUI testing** — Hooks are tested with the git CLI only. GUI clients may behave differently.
-- **Single process** — The service runs one worker. Concurrent requests are serialized.
-- **256 KB file limit** — Files larger than `max_file_bytes` (default 262144) are skipped.
+- **仅 UTF-8** — 通过 `file --mime-encoding` 检测，非 utf-8/us-ascii 的文件被跳过
+- **不支持部分暂存** — 必须完全暂存或完全取消暂存
+- **仅 CLI 测试** — hooks 仅在 git CLI 测试过，GUI 客户端行为可能不同
+- **单进程** — 服务运行单个 worker，请求串行处理
+- **256KB 文件限制** — 超过 `max_file_bytes`（默认 262144）的文件被跳过
 
 ---
 
-## Uninstall
+## 开发
+
+```bash
+cd ~/project/docker/privacy-filter-service
+
+# 创建 venv
+uv venv .venv --python 3.10
+
+# 安装依赖
+uv pip install -e ".[dev]"
+
+# 运行测试
+uv run pytest -q                    # 68 个测试，不需要 GPU
+uv run pytest -q -m gpu             # 1 个 GPU 测试
+uv run ruff check src/              # lint
+
+# 本地启动服务
+OPF_CHECKPOINT=/mnt/LLM/OpenAI/privacy_filter \
+  uvicorn privacy_filter_service.app:create_app --factory --host 127.0.0.1 --port 8765
+```
+
+---
+
+## 卸载
 
 ```bash
 bash install/uninstall.sh
 ```
 
-This stops and disables the systemd service, removes the unit file, unsets `core.hooksPath`, and deletes the hooks. Your `~/.config/privacy-filter/config.toml` and `~/.config/privacy-filter/env` files are preserved.
+停止服务、删除 unit 文件、取消 `core.hooksPath`、删除 hooks。保留 `~/.config/privacy-filter/config.toml` 和 `env`。
 
 ---
 
-## PII Labels
-
-The model detects and redacts the following 8 labels:
-
-1. `account_number`
-2. `private_address`
-3. `private_email`
-4. `private_person`
-5. `private_phone`
-6. `private_url`
-7. `private_date`
-8. `secret`
-
----
-
-## Architecture
-
-```
-+------------------+        HTTP POST         +-------------------------+
-|  git pre-commit  |  --------------------->  |  Privacy Filter Service |
-|  git commit-msg  |  /redact  /redact/text   |  (FastAPI + OPF model)  |
-+------------------+                          +-------------------------+
-        |                                               |
-        | blocks commit + writes patch                  | loads model at startup
-        v                                               v
-   redact-*.patch (in .git/privacy-filter/)      ~/.config/privacy-filter/config.toml
-```
-
----
-
-## License
+## 许可证
 
 MIT
