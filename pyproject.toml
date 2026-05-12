@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "privacy-filter-service"
+version = "0.1.0"
+description = "FastAPI service wrapping the local OPF privacy filter model."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic>=2",
+  "opf @ file:///home/chriswang/project/docker/privacy-filter",
+  "tomli; python_version<\"3.11\"",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-asyncio",
+  "httpx",
+  "ruff",
+]
+
+[project.scripts]
+privacy-filter-service = "privacy_filter_service.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+markers = [
+  "gpu: tests that exercise CUDA-specific engine behavior",
+]
