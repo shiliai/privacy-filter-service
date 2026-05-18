@@ -1,0 +1,1404 @@
+# Privacy Filter Service — LLM Agent Reference
+
+> Self-contained, complete, up-to-date API reference for agents.
+> Last updated: 2026-05-12
+
+---
+
+## Project Overview
+
+**Privacy Filter Service** is a local FastAPI service wrapping the [OpenAI Privacy Filter (OPF)](https://github.com/openai/privacy-filter) model. It detects and redacts Personally Identifiable Information (PII) from text.
+
+**Primary use case**: Scan staged git files and commit messages for PII before committing. Blocks commits containing PII in tracked files, auto-redacts commit messages.
+
+**Runtime**: Single uvicorn worker, asyncio.Lock-serialized inference on RTX 3090 GPU.
+
+**Key properties**:
+- All inference runs locally. No data leaves the machine.
+- Fail-open: service down → warn + skip, never block developer workflow.
+- Sanitized logging: no raw text in journald.
+- 8 PII label types detected.
+
+---
+
+## Architecture
+
+```
++------------------+        HTTP POST         +-------------------------+
+|  git pre-commit  |  --------------------->  |  Privacy Filter Service |
+|  git commit-msg  |  /redact  /redact/text   |  (FastAPI + OPF model)  |
++------------------+  /redact/batch           +-------------------------+
+        |                                               |
+        | blocks commit + writes patch                  | loads model at startup
+        v                                               v
+   redact-*.patch (in .git/privacy-filter/)      ~/.config/privacy-filter/config.toml
+```
+
+---
+
+## API Endpoints
+
+Base URL: `http://127.0.0.1:8765` (configurable)
+
+All endpoints return `X-Request-ID` header (UUID4 generated if not provided).
+
+---
+
+### GET /health
+
+Liveness and readiness probe.
+
+**Request**: No body.
+
+**Response 200** (`application/json`):
+```json
+{
+  "ready": true,
+  "device": "cuda",
+  "uptime_s": 42.15,
+  "version": "0.1.0"
+}
+```
+
+**Response 503** (`application/json`):
+```json
+{
+  "ready": false,
+  "device": "unknown",
+  "uptime_s": 0.0,
+  "version": "0.1.0"
+}
+```
+
+Returns 503 during model warmup (first ~20s after startup), 200 only after `OPF.redact()` smoke test passes.
+
+---
+
+### GET /model-info
+
+Runtime model metadata. Does NOT expose `model_path` (security: avoids leaking filesystem layout).
+
+**Request**: No body.
+
+**Response 200** (`application/json`):
+```json
+{
+  "device": "cuda",
+  "labels": [
+    "account_number",
+    "private_address",
+    "private_email",
+    "private_person",
+    "private_phone",
+    "private_url",
+    "private_date",
+    "secret"
+  ],
+  "output_mode": "typed",
+  "decode_mode": "viterbi",
+  "version": "0.1.0"
+}
+```
+
+**Response 503**: Engine not ready.
+
+---
+
+### POST /redact
+
+Redact PII from a single text string. Returns full structured result with detected spans.
+
+**Request** (`application/json`):
+```json
+{
+  "text": "Email me at alice@example.com or call 555-123-4567"
+}
+```
+
+**Response 200** (`application/json`):
+```json
+{
+  "text": "Email me at alice@example.com or call 555-123-4567",
+  "redacted_text": "Email me at <PRIVATE_EMAIL> or call <PRIVATE_PHONE>",
+  "detected_spans": [
+    {
+      "label": "private_email",
+      "start": 12,
+      "end": 28,
+      "text": "alice@example.com",
+      "placeholder": "<PRIVATE_EMAIL>"
+    },
+    {
+      "label": "private_phone",
+      "start": 37,
+      "end": 49,
+      "text": "555-123-4567",
+      "placeholder": "<PRIVATE_PHONE>"
+    }
+  ],
+  "summary": {
+    "output_mode": "typed",
+    "span_count": 2,
+    "by_label": {
+      "private_email": 1,
+      "private_phone": 1
+    },
+    "decoded_mismatch": false
+  },
+  "schema_version": 1,
+  "warning": null
+}
+```
+
+**Response 413**: Text exceeds `max_file_bytes` (default 262144 bytes).
+
+**Response 503**: Engine not ready.
+
+---
+
+### POST /redact/text
+
+Redact PII and return only the redacted text as plain text. Optimized for hook use (simpler parsing).
+
+**Request** (`application/json`):
+```json
+{
+  "text": "Alice was born on 1990-01-02"
+}
+```
+
+**Response 200** (`text/plain`):
+```
+<PRIVATE_PERSON> was born on <PRIVATE_DATE>
+```
+
+**Response 413**: Text exceeds `max_file_bytes`.
+
+**Response 503**: Engine not ready.
+
+---
+
+### POST /redact/batch
+
+Redact PII from multiple texts in a single request. Returns results in the same order as input.
+
+**Request** (`application/json`):
+```json
+{
+  "texts": [
+    "Hello world",
+    "alice@example.com",
+    "555-123-4567"
+  ]
+}
+```
+
+**Response 200** (`application/json`):
+```json
+[
+  {
+    "text": "Hello world",
+    "redacted_text": "Hello world",
+    "detected_spans": [],
+    "summary": {
+      "output_mode": "typed",
+      "span_count": 0,
+      "by_label": {},
+      "decoded_mismatch": false
+    },
+    "schema_version": 1,
+    "warning": null
+  },
+  {
+    "text": "alice@example.com",
+    "redacted_text": "<PRIVATE_EMAIL>",
+    "detected_spans": [
+      {
+        "label": "private_email",
+        "start": 0,
+        "end": 17,
+        "text": "alice@example.com",
+        "placeholder": "<PRIVATE_EMAIL>"
+      }
+    ],
+    "summary": {
+      "output_mode": "typed",
+      "span_count": 1,
+      "by_label": {"private_email": 1},
+      "decoded_mismatch": false
+    },
+    "schema_version": 1,
+    "warning": null
+  },
+  {
+    "text": "555-123-4567",
+    "redacted_text": "<PRIVATE_PHONE>",
+    "detected_spans": [
+      {
+        "label": "private_phone",
+        "start": 0,
+        "end": 12,
+        "text": "555-123-4567",
+        "placeholder": "<PRIVATE_PHONE>"
+      }
+    ],
+    "summary": {
+      "output_mode": "typed",
+      "span_count": 1,
+      "by_label": {"private_phone": 1},
+      "decoded_mismatch": false
+    },
+    "schema_version": 1,
+    "warning": null
+  }
+]
+```
+
+**Limits**:
+- Max 100 texts per batch (Pydantic `max_length=100`)
+- Each text max `max_file_bytes` bytes
+- Returns 413 with `{"detail":"text at index N exceeds maximum allowed size"}` if any text oversized
+- Returns 422 if batch exceeds 100 items (Pydantic validation)
+
+**Response 503**: Engine not ready.
+
+---
+
+## Pydantic Models (Request/Response)
+
+All models use Pydantic v2.
+
+### RedactRequest
+```python
+class RedactRequest(BaseModel):
+    text: str  # The text to redact
+```
+
+### RedactBatchRequest
+```python
+class RedactBatchRequest(BaseModel):
+    texts: list[str] = Field(..., max_length=100)  # Up to 100 texts
+```
+
+### DetectedSpan
+```python
+class DetectedSpan(BaseModel):
+    label: str       # One of the 8 PII labels
+    start: int       # Character start index (inclusive)
+    end: int         # Character end index (exclusive)
+    text: str        # Original text of the span
+    placeholder: str # Replacement placeholder, e.g. "<PRIVATE_EMAIL>"
+```
+
+### RedactionSummary
+```python
+class RedactionSummary(BaseModel):
+    output_mode: str           # "typed" or "redacted"
+    span_count: int            # Total detected spans
+    by_label: dict[str, int]   # Count per label, e.g. {"private_email": 2}
+    decoded_mismatch: bool = False  # Internal: viterbi vs argmax disagreement
+```
+
+### RedactionResult
+```python
+class RedactionResult(BaseModel):
+    text: str                          # Original input text
+    redacted_text: str                 # Text with PII replaced by placeholders
+    detected_spans: list[DetectedSpan] # All detected PII spans
+    summary: RedactionSummary          # Compact summary
+    schema_version: int = 1            # Always 1
+    warning: str | None = None         # Optional warning (e.g. decode mismatch)
+```
+
+### HealthResponse
+```python
+class HealthResponse(BaseModel):
+    ready: bool     # True only after model warmup completes
+    device: str     # "cuda" or "cpu"
+    uptime_s: float # Seconds since service started
+    version: str    # "0.1.0"
+```
+
+### ModelInfoResponse
+```python
+class ModelInfoResponse(BaseModel):
+    device: str          # "cuda" or "cpu"
+    labels: list[str]    # All 8 PII label names
+    output_mode: str     # "typed" or "redacted"
+    decode_mode: str     # "viterbi" or "argmax"
+    version: str         # "0.1.0"
+    # NOTE: model_path and checkpoint are intentionally excluded (security)
+```
+
+---
+
+## PII Label Taxonomy
+
+The model detects and redacts 8 categories:
+
+| Label | Description | Example |
+|-------|-------------|---------|
+| `account_number` | Bank/account numbers | `1234567890` |
+| `private_address` | Physical addresses | `123 Main St, Springfield` |
+| `private_email` | Email addresses | `alice@example.com` |
+| `private_person` | Person names | `Alice Smith` |
+| `private_phone` | Phone numbers | `555-123-4567` |
+| `private_url` | URLs | `https://example.com/profile` |
+| `private_date` | Dates of birth, etc. | `1990-01-02` |
+| `secret` | API keys, passwords | `sk-abc123...` |
+
+---
+
+## Configuration
+
+### Config file location
+`~/.config/privacy-filter/config.toml`
+
+Overridable via `PRIVACY_FILTER_CONFIG` env var.
+
+### TOML schema
+
+```toml
+[service]
+host = "0.0.0.0"           # Listen address
+port = 8765                 # Listen port (1-65535)
+device = "cuda"             # "cuda" or "cpu"
+output_mode = "typed"       # "typed" (with labels) or "redacted" (collapsed)
+decode_mode = "viterbi"     # "viterbi" or "argmax"
+model_path = ""             # REQUIRED — path to OPF checkpoint dir
+log_level = "INFO"          # Python logging level
+
+[hook]
+base_url = "http://127.0.0.1:8765"  # Service URL hooks call
+request_timeout_s = 5.0             # Hook HTTP timeout (1-60 seconds)
+max_file_bytes = 262144             # Max file size hooks send (<= 1048576)
+max_inflight_warns_per_5min = 1     # Rate limit for repeated warnings
+```
+
+### Environment variable overrides
+
+All config keys can be overridden by env vars (loaded after TOML):
+
+| Env var | Maps to | Type |
+|---------|---------|------|
+| `PRIVACY_FILTER_LISTEN_HOST` | `service.host` | str |
+| `PRIVACY_FILTER_LISTEN_PORT` | `service.port` | int |
+| `PRIVACY_FILTER_DEVICE` | `service.device` | str |
+| `PRIVACY_FILTER_OUTPUT_MODE` | `service.output_mode` | str |
+| `PRIVACY_FILTER_DECODE_MODE` | `service.decode_mode` | str |
+| `PRIVACY_FILTER_MODEL_PATH` | `service.model_path` | str |
+| `PRIVACY_FILTER_LOG_LEVEL` | `service.log_level` | str |
+| `PRIVACY_FILTER_URL` | `hook.base_url` | str |
+| `PRIVACY_FILTER_TIMEOUT_S` | `hook.request_timeout_s` | float |
+| `PRIVACY_FILTER_MAX_FILE_BYTES` | `hook.max_file_bytes` | int |
+| `PRIVACY_FILTER_MAX_INFLIGHT_WARNS` | `hook.max_inflight_warns_per_5min` | int |
+| `OPF_CHECKPOINT` | `service.model_path` (fallback) | str |
+
+Resolution order: TOML → `PRIVACY_FILTER_*` env → `OPF_CHECKPOINT` fallback.
+
+### Validation rules
+
+- `port`: 1–65535
+- `device`: `cuda` or `cpu`
+- `output_mode`: `typed` or `redacted`
+- `decode_mode`: `viterbi` or `argmax`
+- `max_file_bytes`: <= 1048576 (1 MB)
+- `request_timeout_s`: 1–60
+- `model_path`: **required** (no silent fallback)
+- Crashes with `SystemExit` on invalid config (fail-fast)
+
+---
+
+## OPF Engine
+
+### OPFEngine class
+
+Async singleton wrapper around `opf.OPF`. Key behaviors:
+
+- **Lazy initialization**: Constructor does NOT load the model. `warmup()` loads it.
+- **asyncio.Lock serialization**: All `redact()` calls acquire the lock. Model is not validated for concurrency.
+- **CUDA validation**: If `device="cuda"` and `torch.cuda.is_available()` is False, `warmup()` raises `RuntimeError` (fail-fast at startup, not per-request).
+- **Singleton pattern**: Module-level `_engine` variable + `get_engine()` FastAPI dependency.
+
+### Constructor
+
+```python
+OPFEngine(service_settings: ServiceConfig)
+# Attributes: device, output_mode, decode_mode, model_path, ready (bool)
+```
+
+### Methods
+
+```python
+async warmup() -> None
+# Loads OPF model, runs smoke test redact("test"), sets ready=True
+# Raises RuntimeError if CUDA unavailable when device="cuda"
+
+async redact(text: str) -> RedactionResult
+# Acquires lock, calls OPF.redact(), converts to Pydantic model
+# Calls warmup() first if not ready
+
+async redact_batch(texts: list[str]) -> list[RedactionResult]
+# Iterates texts under lock (one-at-a-time), returns results in order
+# Calls warmup() first if not ready
+```
+
+### get_engine() dependency
+
+```python
+async def get_engine(settings: Annotated[Settings, Depends(load_settings)]) -> OPFEngine
+```
+
+Returns singleton engine, warming it lazily on first use. Used as FastAPI `Depends()`.
+
+---
+
+## Git Hooks
+
+### Pre-commit hook (`hooks/pre-commit`)
+
+**Behavior**:
+1. Checks `PRIVACY_FILTER_SKIP=1` → exit 0
+2. Checks service health (`/health`) → fail-open if down
+3. Lists fully-staged files (`git diff --cached --name-only --diff-filter=ACM`)
+4. Detects partial staging → abort with message
+5. For each text file (UTF-8, not binary/symlink/submodule/LFS/oversized):
+   - Extracts staged content via `git show :<path>`
+   - POSTs to `/redact`
+   - If spans detected: saves orig + redacted to `.git/privacy-filter/`
+6. If any PII found:
+   - Generates unified diff patch at `.git/privacy-filter/redact-<timestamp>-<pid>.patch`
+   - Validates patch via `git apply --check`
+   - Blocks commit (exit 1) with apply instructions
+7. Otherwise: exit 0
+
+**File filtering** (skipped files):
+- Binary (detected via `git diff --cached --numstat` showing `-\t-`)
+- Symlinks
+- Git submodules (mode `160000`)
+- LFS pointer files (content starts with `version https://git-lfs.github.com/spec/v1`)
+- Files > `max_file_bytes` (default 256 KB)
+- Non-UTF-8 encoding (detected via `file --mime-encoding`)
+- Files with `binary` git attribute
+
+**Patch format**: Standard unified diff compatible with `git apply --index`.
+
+### Commit-msg hook (`hooks/commit-msg`)
+
+**Behavior**:
+1. Checks `PRIVACY_FILTER_SKIP=1` → exit 0
+2. Checks service health → fail-open if down
+3. Reads message file (`$1`), splits into 3 zones:
+   - **Body**: user-written lines (redacted)
+   - **Comments**: lines starting with `#` (preserved untouched)
+   - **Verbose section**: lines after `------ >8 ------` (preserved untouched)
+4. POSTs body to `/redact/text`
+5. If redacted text differs from original:
+   - Reconstructs file: redacted body + original comments + verbose section
+   - Preserves BOM if present
+   - Writes back to message file
+   - Prints span count + by_label summary to stderr
+6. **Always exits 0** — commit-msg never blocks
+
+### Bypass mechanisms
+
+- `PRIVACY_FILTER_SKIP=1` env var → skip all hooks
+- `git commit --no-verify` → bypass all git hooks
+- `PRIVACY_FILTER_URL=http://invalid:1` → service down → fail-open
+
+### Hook shared library (`hooks/_lib.sh`)
+
+Key functions:
+
+| Function | Description |
+|----------|-------------|
+| `pf_url()` | Returns `PRIVACY_FILTER_URL` or default `http://127.0.0.1:8765` |
+| `pf_skip_active()` | Returns 0 if `PRIVACY_FILTER_SKIP=1` |
+| `pf_is_text_file <path>` | Returns 0 if file is UTF-8 text, not binary/symlink/submodule/LFS |
+| `pf_is_lfs_pointer <path>` | Returns 0 if file is a Git LFS pointer |
+| `pf_too_large <bytes>` | Returns 0 if size > `max_file_bytes` |
+| `pf_post_json <endpoint> <json>` | POST JSON to service, body on stdout, HTTP code on stderr |
+| `pf_warn_once <key> <msg>` | Rate-limited warning (once per 5 min per key) |
+| `pf_fail_open <reason>` | Print warning + exit 0 |
+| `pf_ensure_dir` | Create `.git/privacy-filter/` with 0700 perms |
+| `pf_service_ready` | Check `/health` returns `ready=true` |
+| `pf_cleanup_old_patches` | Delete patches older than 24 hours |
+
+---
+
+## Error Handling
+
+| Status | Meaning | When |
+|--------|---------|------|
+| 200 | Success | Normal operation |
+| 413 | Payload too large | Text exceeds `max_file_bytes` or batch > 100 items |
+| 422 | Validation error | Invalid JSON, missing `text` field, batch > 100 (Pydantic) |
+| 503 | Service unavailable | Engine not ready (during warmup or startup failure) |
+
+**Error responses** never include raw input text (security).
+
+**Hook fail-open matrix**:
+- Connection refused → warn + exit 0
+- Timeout → warn + exit 0
+- HTTP 5xx → warn + exit 0
+- Malformed JSON response → warn + exit 0
+- HTTP 413 (oversized) → skip file, continue
+
+---
+
+## Logging
+
+Structured JSON to stdout. Fields: `timestamp`, `level`, `logger`, `request_id`, `msg`, `span_count`, `duration_ms`.
+
+**Redacted fields** (replaced with `<REDACTED>` in any log record):
+`text`, `message`, `content`, `payload`, `redacted_text`, `detected_spans`, `placeholder`
+
+**Uvicorn access log**: Disabled (handlers cleared, propagate=False, level > CRITICAL).
+
+**Exception tracebacks**: Replaced with `<REDACTED>` to prevent body leakage.
+
+---
+
+## Installation
+
+### Prerequisites
+
+- Python 3.10+
+- [uv](https://docs.astral.sh/uv/) package manager
+- OPF installed editable from `/home/chriswang/project/docker/privacy-filter`
+- Model checkpoint at `/mnt/LLM/OpenAI/privacy_filter`
+- CUDA-capable GPU (optional; CPU fallback works)
+
+### Install service
+
+```bash
+cd ~/project/docker/privacy-filter-service
+bash install/install-service.sh
+```
+
+This: creates venv, installs deps, deploys config.toml + env, installs systemd user unit, starts service, waits for health.
+
+### Install hooks
+
+```bash
+bash install/install-hooks.sh
+```
+
+This: copies hooks to `~/.config/git/hooks/`, sets `git config --global core.hooksPath`.
+
+Use `--force` to override existing `core.hooksPath`.
+
+### Uninstall
+
+```bash
+bash install/uninstall.sh
+```
+
+Preserves `~/.config/privacy-filter/config.toml` and `env`.
+
+---
+
+## Systemd Operation
+
+```bash
+systemctl --user start privacy-filter
+systemctl --user stop privacy-filter
+systemctl --user restart privacy-filter
+systemctl --user status privacy-filter
+journalctl --user -u privacy-filter -f
+```
+
+Unit file: `~/.config/systemd/user/privacy-filter.service`
+
+Uses `%h` specifier (user home), `EnvironmentFile=-%h/.config/privacy-filter/env` (optional), `Restart=on-failure`, `RestartSec=5s`.
+
+For boot-time availability: `loginctl enable-linger $USER`
+
+---
+
+## Testing
+
+### Pytest (service)
+
+```bash
+cd ~/project/docker/privacy-filter-service
+uv run pytest -q              # 68 tests, no GPU required
+uv run pytest -q -m gpu       # 1 test, requires GPU
+```
+
+### Integration tests (hooks)
+
+```bash
+bash tests/integration/run_all.sh   # 13 tests in isolated /tmp repos
+```
+
+Tests: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment preservation, service-down fail-open, skip env bypass, no-verify bypass, concurrent commits, installer collision/force/uninstall.
+
+### End-to-end smoke
+
+```bash
+bash tests/e2e/smoke.sh   # 7 scenarios, idempotent, <60s
+```
+
+Full lifecycle: install → hook tests → journal leak check → uninstall → cleanup.
+
+---
+
+## Source Files
+
+### Project structure
+
+```
+privacy-filter-service/
+├── pyproject.toml                          # Build config, deps, entry point
+├── config.toml.example                     # Config template
+├── README.md                               # User documentation
+├── config/
+│   └── env.example                         # Environment variable template
+├── src/privacy_filter_service/
+│   ├── __init__.py                         # Package init
+│   ├── app.py                              # FastAPI factory, routes, entrypoint
+│   ├── config.py                           # TOML + env config loader
+│   ├── logging_setup.py                    # Sanitized JSON logging + middleware
+│   ├── models.py                           # Pydantic request/response models
+│   └── opf_engine.py                       # Async OPF wrapper with Lock
+├── hooks/
+│   ├── _lib.sh                             # Shared bash library
+│   ├── pre-commit                          # Pre-commit hook (scan + patch)
+│   └── commit-msg                          # Commit-msg hook (auto-redact)
+├── install/
+│   ├── install-service.sh                  # Service installer
+│   ├── install-hooks.sh                    # Hook installer
+│   └── uninstall.sh                        # Uninstaller
+├── systemd/
+│   └── privacy-filter.service              # systemd user unit
+├── tests/
+│   ├── conftest.py                         # Shared fixtures
+│   ├── test_config.py                      # Config loader tests
+│   ├── test_models.py                      # Pydantic model tests
+│   ├── test_logging.py                     # Logging redaction tests
+│   ├── test_opf_engine.py                  # Engine wrapper tests
+│   ├── test_health.py                      # /health + /model-info tests
+│   ├── test_redact.py                      # /redact + /redact/text tests
+│   ├── test_batch.py                       # /redact/batch tests
+│   ├── integration/                        # Bash integration tests
+│   │   ├── run_all.sh                      # Test runner
+│   │   ├── common.sh                       # Shared helpers
+│   │   ├── mock_service.py                 # Mock HTTP service
+│   │   └── test_*.sh                       # Individual test scripts
+│   └── e2e/
+│       └── smoke.sh                        # End-to-end smoke test
+└── docs/
+    └── llms-full.txt                       # This file
+```
+
+### Key source: app.py
+
+```python
+"""FastAPI application factory with lifespan-managed OPF engine."""
+
+from __future__ import annotations
+
+import logging
+import time
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+import uvicorn
+from fastapi import Depends, FastAPI, Request, Response
+from fastapi.responses import PlainTextResponse
+
+from privacy_filter_service.config import Settings, load_settings
+from privacy_filter_service.logging_setup import configure_logging, request_id_middleware
+from privacy_filter_service.models import (
+    LABELS,
+    HealthResponse,
+    ModelInfoResponse,
+    RedactBatchRequest,
+    RedactRequest,
+)
+from privacy_filter_service.opf_engine import OPFEngine
+
+log = logging.getLogger(__name__)
+
+MAX_BATCH_SIZE = 100
+
+
+def _get_engine(request: Request) -> OPFEngine | None:
+    engine: OPFEngine | None = getattr(request.app.state, "engine", None)
+    return engine
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Create engine, warm up model, tear down on shutdown."""
+    settings: Settings = app.state.settings
+    engine = OPFEngine(settings.service)
+    app.state.engine = engine
+    app.state.start_time = time.monotonic()
+    log.info("warming up OPF engine (device=%s)", engine.device)
+    await engine.warmup()
+    log.info("OPF engine ready (device=%s)", engine.device)
+    yield
+    app.state.engine = None
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    """Build and return a configured FastAPI instance."""
+    if settings is None:
+        settings = load_settings()
+
+    app = FastAPI(
+        title="Privacy Filter Service",
+        version="0.1.0",
+        lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+    )
+    app.state.settings = settings
+    app.add_middleware(request_id_middleware)
+
+    _register_routes(app)
+    return app
+
+
+def _register_routes(app: FastAPI) -> None:
+    """Attach all endpoint handlers to *app*."""
+
+    @app.get("/health", response_model=HealthResponse)
+    async def health(request: Request) -> HealthResponse | Response:
+        engine: OPFEngine | None = getattr(request.app.state, "engine", None)
+        if engine is None or not engine.ready:
+            return Response(
+                content=HealthResponse(
+                    ready=False, device="unknown", uptime_s=0.0, version="0.1.0"
+                ).model_dump_json(),
+                status_code=503,
+                media_type="application/json",
+            )
+        uptime = time.monotonic() - getattr(request.app.state, "start_time", 0)
+        return HealthResponse(
+            ready=True,
+            device=engine.device,
+            uptime_s=round(uptime, 2),
+            version="0.1.0",
+        )
+
+    @app.get("/model-info", response_model=ModelInfoResponse)
+    async def model_info(
+        request: Request,
+        engine: OPFEngine | None = Depends(_get_engine),
+    ) -> ModelInfoResponse | Response:
+        if engine is None or not engine.ready:
+            return Response(status_code=503, content='{"detail":"engine not ready"}')
+        return ModelInfoResponse(
+            device=engine.device,
+            labels=list(LABELS),
+            output_mode=engine.output_mode,
+            decode_mode=engine.decode_mode,
+            version="0.1.0",
+        )
+
+    @app.post("/redact")
+    async def redact(
+        body: RedactRequest,
+        request: Request,
+        engine: OPFEngine | None = Depends(_get_engine),
+    ) -> Response:
+        if engine is None or not engine.ready:
+            return Response(status_code=503, content='{"detail":"engine not ready"}')
+        settings: Settings = request.app.state.settings
+        if len(body.text.encode("utf-8")) > settings.hook.max_file_bytes:
+            return Response(
+                status_code=413,
+                content='{"detail":"text exceeds maximum allowed size"}',
+                media_type="application/json",
+            )
+        t0 = time.monotonic()
+        result = await engine.redact(body.text)
+        duration_ms = round((time.monotonic() - t0) * 1000, 2)
+        log.info(
+            "redact request",
+            extra={
+                "endpoint": "/redact",
+                "text_len": len(body.text),
+                "span_count": result.summary.span_count,
+                "duration_ms": duration_ms,
+            },
+        )
+        return Response(
+            content=result.model_dump_json(),
+            media_type="application/json",
+        )
+
+    @app.post("/redact/text")
+    async def redact_text(
+        body: RedactRequest,
+        request: Request,
+        engine: OPFEngine | None = Depends(_get_engine),
+    ) -> Response:
+        if engine is None or not engine.ready:
+            return Response(status_code=503, content='{"detail":"engine not ready"}')
+        settings: Settings = request.app.state.settings
+        if len(body.text.encode("utf-8")) > settings.hook.max_file_bytes:
+            return Response(
+                status_code=413,
+                content='{"detail":"text exceeds maximum allowed size"}',
+                media_type="application/json",
+            )
+        t0 = time.monotonic()
+        result = await engine.redact(body.text)
+        duration_ms = round((time.monotonic() - t0) * 1000, 2)
+        log.info(
+            "redact/text request",
+            extra={
+                "endpoint": "/redact/text",
+                "text_len": len(body.text),
+                "span_count": result.summary.span_count,
+                "duration_ms": duration_ms,
+            },
+        )
+        return PlainTextResponse(result.redacted_text)
+
+    @app.post("/redact/batch")
+    async def redact_batch(
+        body: RedactBatchRequest,
+        request: Request,
+        engine: OPFEngine | None = Depends(_get_engine),
+    ) -> Response:
+        if engine is None or not engine.ready:
+            return Response(status_code=503, content='{"detail":"engine not ready"}')
+        settings: Settings = request.app.state.settings
+        if len(body.texts) > MAX_BATCH_SIZE:
+            return Response(
+                status_code=413,
+                content='{"detail":f"batch size {len(body.texts)} exceeds limit of {MAX_BATCH_SIZE}"}',
+                media_type="application/json",
+            )
+        for idx, text in enumerate(body.texts):
+            if len(text.encode("utf-8")) > settings.hook.max_file_bytes:
+                return Response(
+                    status_code=413,
+                    content=f'{{"detail":"text at index {idx} exceeds maximum allowed size"}}',
+                    media_type="application/json",
+                )
+        t0 = time.monotonic()
+        results = await engine.redact_batch(body.texts)
+        duration_ms = round((time.monotonic() - t0) * 1000, 2)
+        total_spans = sum(r.summary.span_count for r in results)
+        log.info(
+            "redact/batch request",
+            extra={
+                "endpoint": "/redact/batch",
+                "text_len": sum(len(t) for t in body.texts),
+                "span_count": total_spans,
+                "duration_ms": duration_ms,
+            },
+        )
+        import json
+
+        return Response(
+            content=json.dumps([r.model_dump() for r in results]),
+            media_type="application/json",
+        )
+
+
+def main() -> None:
+    """CLI entrypoint — configure logging and start uvicorn."""
+    settings = load_settings()
+    configure_logging(settings.service.log_level)
+    app = create_app(settings)
+    uvicorn.run(
+        app,
+        host=settings.service.host,
+        port=settings.service.port,
+        workers=1,
+        access_log=False,
+    )
+```
+
+### Key source: config.py
+
+```python
+"""Pydantic-based configuration loader with TOML + env-var overlay."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from typing import Literal
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
+from pydantic import BaseModel, Field, ValidationError
+
+OPF_CHECKPOINT_ENV = "OPF_CHECKPOINT"
+PRIVACY_FILTER_CONFIG_ENV = "PRIVACY_FILTER_CONFIG"
+
+_ENV_OVERRIDES: dict[str, str] = {
+    "PRIVACY_FILTER_LISTEN_HOST": "service.host",
+    "PRIVACY_FILTER_LISTEN_PORT": "service.port",
+    "PRIVACY_FILTER_DEVICE": "service.device",
+    "PRIVACY_FILTER_OUTPUT_MODE": "service.output_mode",
+    "PRIVACY_FILTER_DECODE_MODE": "service.decode_mode",
+    "PRIVACY_FILTER_MODEL_PATH": "service.model_path",
+    "PRIVACY_FILTER_LOG_LEVEL": "service.log_level",
+    "PRIVACY_FILTER_URL": "hook.base_url",
+    "PRIVACY_FILTER_TIMEOUT_S": "hook.request_timeout_s",
+    "PRIVACY_FILTER_MAX_FILE_BYTES": "hook.max_file_bytes",
+    "PRIVACY_FILTER_MAX_INFLIGHT_WARNS": "hook.max_inflight_warns_per_5min",
+}
+
+
+def _deep_set(data: dict, dotted: str, value: object) -> None:
+    parts = dotted.split(".")
+    current = data
+    for part in parts[:-1]:
+        current = current.setdefault(part, {})
+    current[parts[-1]] = value
+
+
+def _apply_env_overlays(raw: dict) -> dict:
+    for env_var, dotted_key in _ENV_OVERRIDES.items():
+        val = os.environ.get(env_var)
+        if val is None:
+            continue
+        if dotted_key in (
+            "service.port",
+            "hook.request_timeout_s",
+            "hook.max_file_bytes",
+            "hook.max_inflight_warns_per_5min",
+        ):
+            try:
+                val = int(val)
+            except ValueError:
+                try:
+                    val = float(val)
+                except ValueError:
+                    pass
+        _deep_set(raw, dotted_key, val)
+    return raw
+
+
+class ServiceConfig(BaseModel):
+    """Configuration for the privacy-filter inference service."""
+
+    host: str = "0.0.0.0"
+    port: int = Field(default=8765, ge=1, le=65535)
+    device: Literal["cuda", "cpu"] = "cuda"
+    output_mode: Literal["typed", "redacted"] = "typed"
+    decode_mode: Literal["viterbi", "argmax"] = "viterbi"
+    model_path: str
+    log_level: str = "INFO"
+
+
+class HookConfig(BaseModel):
+    """Configuration for the Git pre-receive hook client."""
+
+    base_url: str = "http://127.0.0.1:8765"
+    request_timeout_s: float = Field(default=5.0, ge=1, le=60)
+    max_file_bytes: int = Field(default=262144, le=1_048_576)
+    max_inflight_warns_per_5min: int = 1
+
+
+class Settings(BaseModel):
+    """Top-level application settings."""
+
+    service: ServiceConfig
+    hook: HookConfig = Field(default_factory=HookConfig)
+
+
+def load_settings(
+    config_path: str | Path | None = None,
+    config_text: str | None = None,
+) -> Settings:
+    """Load TOML config, overlay env vars, validate, and return Settings.
+
+    Resolution order (later wins):
+      1. TOML file (~/.config/privacy-filter/config.toml or PRIVACY_FILTER_CONFIG)
+      2. PRIVACY_FILTER_* env var overrides
+      3. OPF_CHECKPOINT env -> service.model_path (only if TOML didn't set it)
+
+    Crashes with SystemExit on invalid or missing config.
+    """
+    if config_text is not None:
+        raw: dict = tomllib.loads(config_text)
+    else:
+        if config_path is None:
+            config_path = os.environ.get(
+                PRIVACY_FILTER_CONFIG_ENV,
+                Path.home() / ".config" / "privacy-filter" / "config.toml",
+            )
+        config_path = Path(config_path)
+        if not config_path.is_file():
+            print(
+                f"[FATAL] Config file not found: {config_path}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+
+    raw = _apply_env_overlays(raw)
+
+    svc = raw.setdefault("service", {})
+    if "model_path" not in svc:
+        checkpoint = os.environ.get(OPF_CHECKPOINT_ENV)
+        if checkpoint:
+            svc["model_path"] = checkpoint
+
+    try:
+        return Settings.model_validate(raw)
+    except ValidationError as exc:
+        print("[FATAL] Invalid configuration:", file=sys.stderr)
+        print(exc, file=sys.stderr)
+        sys.exit(1)
+```
+
+### Key source: opf_engine.py
+
+```python
+"""Async singleton wrapper for the local OPF redaction engine."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Annotated, Literal
+
+from fastapi import Depends
+from opf._api import OPF, RedactionResult as OPFRedactionResult
+
+from privacy_filter_service.config import ServiceConfig, Settings, load_settings
+from privacy_filter_service.models import RedactionResult
+
+
+class OPFEngine:
+    """Serialize access to a single OPF instance."""
+
+    def __init__(self, service_settings: ServiceConfig) -> None:
+        self.device: Literal["cuda", "cpu"] = service_settings.device
+        self.output_mode: Literal["typed", "redacted"] = service_settings.output_mode
+        self.decode_mode: Literal["viterbi", "argmax"] = service_settings.decode_mode
+        self.model_path: str = service_settings.model_path
+        self.ready: bool = False
+        self._opf: OPF | None = None
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        return self._lock
+
+    async def warmup(self) -> None:
+        """Instantiate OPF once and verify the configured device works."""
+        async with self._lock:
+            if self.ready:
+                return
+            self._validate_device()
+            opf = OPF(
+                model=self.model_path,
+                device=self.device,
+                output_mode=self.output_mode,
+                decode_mode=self.decode_mode,
+            )
+            smoke: str | OPFRedactionResult = opf.redact("test")
+            if isinstance(smoke, str):
+                raise TypeError("OPF.redact() returned text-only output during warmup")
+            self._opf = opf
+            self.ready = True
+
+    async def redact(self, text: str) -> RedactionResult:
+        await self.warmup()
+        async with self._lock:
+            opf = self._require_opf()
+            result: str | OPFRedactionResult = opf.redact(text)
+            if isinstance(result, str):
+                raise TypeError("OPF.redact() returned text-only output")
+            return RedactionResult.model_validate(result.to_dict())
+
+    async def redact_batch(self, texts: list[str]) -> list[RedactionResult]:
+        await self.warmup()
+        async with self._lock:
+            opf = self._require_opf()
+            results: list[RedactionResult] = []
+            for text in texts:
+                result: str | OPFRedactionResult = opf.redact(text)
+                if isinstance(result, str):
+                    raise TypeError("OPF.redact() returned text-only output")
+                results.append(RedactionResult.model_validate(result.to_dict()))
+            return results
+
+    def _require_opf(self) -> OPF:
+        if self._opf is None:
+            raise RuntimeError("OPF engine not initialized")
+        return self._opf
+
+    def _validate_device(self) -> None:
+        if self.device != "cuda":
+            return
+        import torch
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested for OPFEngine, but torch.cuda.is_available() is False")
+
+
+_engine: OPFEngine | None = None
+
+
+async def get_engine(settings: Annotated[Settings, Depends(load_settings)]) -> OPFEngine:
+    """Return the singleton engine instance, warming it lazily on first use."""
+    global _engine
+    if _engine is None:
+        _engine = OPFEngine(settings.service)
+    if not _engine.ready:
+        await _engine.warmup()
+    return _engine
+```
+
+### Key source: models.py
+
+```python
+"""Pydantic v2 models for the privacy-filter-service API."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+# Label taxonomy
+
+LABELS: tuple[str, ...] = (
+    "account_number",
+    "private_address",
+    "private_email",
+    "private_person",
+    "private_phone",
+    "private_url",
+    "private_date",
+    "secret",
+)
+
+assert len(LABELS) == 8
+
+
+# Request models
+
+class RedactRequest(BaseModel):
+    """Single-text redaction request."""
+    text: str
+
+
+class RedactBatchRequest(BaseModel):
+    """Batch redaction request (up to 100 texts)."""
+    texts: list[str] = Field(..., max_length=100)
+
+
+# Response domain models
+
+class DetectedSpan(BaseModel):
+    """One detected character span with label and placeholder."""
+    label: str
+    start: int
+    end: int
+    text: str
+    placeholder: str
+
+
+class RedactionSummary(BaseModel):
+    """Compact summary of a redaction pass."""
+    output_mode: str
+    span_count: int
+    by_label: dict[str, int]
+    decoded_mismatch: bool = False
+
+
+class RedactionResult(BaseModel):
+    """Structured result returned by the public OPF redaction API."""
+    text: str
+    redacted_text: str
+    detected_spans: list[DetectedSpan]
+    summary: RedactionSummary
+    schema_version: int = 1
+    warning: str | None = None
+
+
+# Operational models
+
+class HealthResponse(BaseModel):
+    """Liveness / readiness probe response."""
+    ready: bool
+    device: str
+    uptime_s: float
+    version: str
+
+
+class ModelInfoResponse(BaseModel):
+    """Runtime model metadata exposed to callers.
+    Intentionally omits model_path and checkpoint (security)."""
+    device: str
+    labels: list[str]
+    output_mode: str
+    decode_mode: str
+    version: str
+```
+
+### Key source: logging_setup.py
+
+```python
+"""Sanitized logging setup — never logs raw text."""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import uuid
+from contextvars import ContextVar
+from typing import Any, Callable, Optional
+
+_request_id: ContextVar[str] = ContextVar("request_id", default="-")
+
+_REDACT_KEYS = frozenset(
+    {"text", "message", "content", "payload", "redacted_text", "detected_spans", "placeholder"}
+)
+
+_FORMATTER_SKIP_KEYS = frozenset({
+    "name", "msg", "args", "created", "relativeCreated",
+    "exc_info", "exc_text", "stack_info", "lineno", "funcName",
+    "pathname", "filename", "module", "thread", "threadName",
+    "process", "processName", "levelname", "levelno", "message",
+    "msecs", "taskName",
+})
+
+
+class RedactFilter(logging.Filter):
+    """Strips sensitive fields from LogRecord attributes and extra dict."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        for key in list(record.__dict__.keys()):
+            if key in _REDACT_KEYS:
+                setattr(record, key, "<REDACTED>")
+        return True
+
+
+class _SafeJSONFormatter(logging.Formatter):
+    """Emit one JSON object per line with guaranteed redaction."""
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": self.formatTime(record, self.datefmt),
+            "level": record.levelname,
+            "logger": record.name,
+            "request_id": _request_id.get("-"),
+            "msg": record.getMessage(),
+        }
+        safe_extra_keys = {
+            k: v for k, v in record.__dict__.items()
+            if k not in _REDACT_KEYS and k not in _FORMATTER_SKIP_KEYS
+        }
+        payload["span_count"] = safe_extra_keys.pop("span_count", 0)
+        payload["duration_ms"] = safe_extra_keys.pop("duration_ms", 0)
+        payload.update(safe_extra_keys)
+        for key in _REDACT_KEYS:
+            payload.pop(key, None)
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self.formatException(record.exc_info)
+        if record.exc_text:
+            payload["exception"] = "<REDACTED>"
+        return json.dumps(payload, default=str)
+
+
+def configure_logging(level: str = "INFO", *, stream: Optional[Any] = None) -> None:
+    """Set up structured JSON logging."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    handler = logging.StreamHandler(stream or sys.stdout)
+    handler.setFormatter(_SafeJSONFormatter(datefmt="%Y-%m-%dT%H:%M:%S.%fZ"))
+    handler.addFilter(RedactFilter())
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
+    root.addHandler(handler)
+    logging.getLogger("uvicorn.access").handlers.clear()
+    logging.getLogger("uvicorn.access").propagate = False
+    logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL + 1)
+    logging.getLogger("uvicorn.error").addFilter(RedactFilter())
+
+
+def request_id_middleware(app: Any) -> Callable:
+    """ASGI middleware that injects X-Request-ID into every request."""
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request
+    from starlette.responses import Response
+
+    class _Middleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next: Callable) -> Response:
+            rid = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+            token = _request_id.set(rid)
+            try:
+                response = await call_next(request)
+            finally:
+                _request_id.reset(token)
+            response.headers["X-Request-ID"] = rid
+            return response
+
+    return _Middleware(app)
+```
+
+---
+
+## Quick Reference
+
+### curl examples
+
+```bash
+# Health check
+curl -fsS http://127.0.0.1:8765/health | jq .
+
+# Model info
+curl -fsS http://127.0.0.1:8765/model-info | jq .
+
+# Single redact (full result)
+curl -fsS -X POST http://127.0.0.1:8765/redact \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com or call 555-123-4567"}' | jq .
+
+# Single redact (text only)
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Alice was born 1990-01-02"}'
+
+# Batch redact
+curl -fsS -X POST http://127.0.0.1:8765/redact/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"texts":["Hello world","alice@example.com","555-123-4567"]}' | jq .
+```
+
+### Python usage
+
+```python
+import httpx
+
+# Single redact
+resp = httpx.post(
+    "http://127.0.0.1:8765/redact",
+    json={"text": "Contact alice@example.com"},
+)
+result = resp.json()
+print(result["redacted_text"])  # "Contact <PRIVATE_EMAIL>"
+print(result["summary"]["span_count"])  # 1
+
+# Text-only redact
+resp = httpx.post(
+    "http://127.0.0.1:8765/redact/text",
+    json={"text": "Alice email is alice@example.com"},
+)
+print(resp.text)  # "<PRIVATE_PERSON> email is <PRIVATE_EMAIL>"
+
+# Batch redact
+resp = httpx.post(
+    "http://127.0.0.1:8765/redact/batch",
+    json={"texts": ["Hello", "alice@example.com"]},
+)
+results = resp.json()
+for r in results:
+    print(r["text"], "->", r["redacted_text"])
+```
