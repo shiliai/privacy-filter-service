@@ -469,3 +469,22 @@ bash install/uninstall.sh
 - [ ] Skip 机制正常：`PRIVACY_FILTER_SKIP=1 git commit` 可正常提交
 - [ ] （远程服务）`PRIVACY_FILTER_URL` 已正确配置
 - [ ] （远程服务）超时已根据网络延迟调整
+
+---
+
+## 部署后更新 OPF-for-agent 文档
+
+完成部署后，**必须**根据实际部署情况更新 `OPF-for-agent.md`：
+
+1. **更新服务地址**：将文档中的 `REMOTE_IP` 替换为实际的内网 IP 或主机名
+2. **更新 GPU 信息**：如果 GPU 型号与文档不一致，更新 GPU 描述
+3. **更新网络配置**：如果使用了非默认端口或 HTTPS，更新相关示例
+4. **验证文档准确性**：确保所有 `curl` 示例和配置示例与实际部署一致
+
+更新后的文档应提交到仓库：
+
+```bash
+git add OPF-for-agent.md
+git commit -m "docs: update OPF-for-agent.md with actual deployment details"
+git push
+```

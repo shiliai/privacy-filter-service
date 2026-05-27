@@ -10,7 +10,7 @@ This guide explains how to configure git on your local machine to use the privac
 - Network access to that host on port `8765`
 - Bash, git, curl, and python3 installed locally
 
-The service is currently running on `M2S2VMUbuntuA6000` (internal network). Ask your network admin for the reachable IP if you do not have it.
+The service is currently running on `M2S2VMUbuntuA6000` (internal network) with an NVIDIA RTX A6000 GPU and CUDA 12.6. Ask your network admin for the reachable IP if you do not have it.
 
 ---
 
@@ -116,6 +116,7 @@ These variables control hook behavior. Set them in your shell or in `~/.bashrc`.
 | `PRIVACY_FILTER_TIMEOUT_S` | `5` | HTTP timeout in seconds (1 to 60). Increase if the remote host is slow or far away. |
 | `PRIVACY_FILTER_MAX_FILE_BYTES` | `262144` | Maximum file size the hook will scan, in bytes. The service itself rejects anything over 1 MB. |
 | `PRIVACY_FILTER_SKIP` | `0` | Set to `1` to skip all privacy-filter checks for a single commit. |
+| `PRIVACY_FILTER_MAX_INFLIGHT_WARNS` | `1` | Maximum "fail-open" warnings printed per 5-minute window. Prevents log spam when the service is unreachable. |
 
 ### Example: Slow Network
 
@@ -169,7 +170,7 @@ If the model flagged something harmless, you can skip the check for that commit:
 PRIVACY_FILTER_SKIP=1 git commit -m "your message"
 ```
 
-This bypasses both pre-commit and commit-msg hooks for this commit only.
+This bypasses both pre-commit and commit-msg hooks for this commit only. The environment variable is scoped to the single command, so subsequent commits run normally.
 
 You can also use git's built-in bypass:
 
@@ -177,7 +178,14 @@ You can also use git's built-in bypass:
 git commit --no-verify -m "your message"
 ```
 
-Both methods are safe. The hooks are designed to fail open, so skipping them does not break anything.
+The difference between the two:
+
+| Mechanism | Scope | What it skips |
+|-----------|-------|---------------|
+| `PRIVACY_FILTER_SKIP=1` | Single commit | Only privacy-filter hooks (pre-commit and commit-msg). Other hooks still run. |
+| `git commit --no-verify` | Single commit | **All** hooks (pre-commit, commit-msg, and any others installed by tools like Husky or pre-commit). |
+
+Use `PRIVACY_FILTER_SKIP=1` when you want to bypass the privacy filter but still run other checks (linting, tests, etc.). Use `--no-verify` only when you need to skip every hook. Both are safe. The hooks are designed to fail open, so skipping them does not break anything.
 
 ### Option 3: Edit the File and Retry
 
@@ -329,6 +337,26 @@ Large files or slow networks need more time.
 - **No encryption by default**. If you need HTTPS, set `PRIVACY_FILTER_URL` to an `https://` endpoint and ensure the remote service is behind a reverse proxy with TLS.
 - **Model path is never exposed**. The `/model-info` endpoint does not leak filesystem paths.
 - **Logs are sanitized**. The remote service does not log raw text content.
+
+### HTTPS / TLS Best Practices
+
+If you run the service across untrusted networks, use TLS end-to-end.
+
+1. **Reverse proxy** — Put the service behind nginx, Caddy, or another reverse proxy that terminates TLS. Forward to `http://127.0.0.1:8765` on the service host.
+2. **Certificate** — Use a valid certificate from your internal CA or a public CA. Avoid self-signed certs unless every client trusts the CA.
+3. **Client configuration** — Point hooks at the HTTPS endpoint:
+
+   ```bash
+   export PRIVACY_FILTER_URL="https://privacy-filter.internal.example.com"
+   ```
+
+4. **Certificate pinning (optional)** — If you use a private CA, distribute the CA certificate to clients and configure `curl` to trust it:
+
+   ```bash
+   export CURL_CA_BUNDLE=/path/to/internal-ca.crt
+   ```
+
+5. **Do not expose the service to the public internet** without authentication. The API has no built-in auth. If you must expose it, add an API gateway or VPN in front.
 
 ---
 
