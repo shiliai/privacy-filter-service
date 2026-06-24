@@ -37,3 +37,6 @@ Thumbs.db
 
 # Compiled
 *.so
+
+# Worktrees
+.claude/worktrees/

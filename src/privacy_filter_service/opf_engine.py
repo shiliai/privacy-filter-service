@@ -11,6 +11,7 @@ from fastapi import Depends
 from opf._api import OPF, RedactionResult as OPFRedactionResult
 
 from privacy_filter_service.config import ServiceConfig, Settings, load_settings
+from privacy_filter_service.fast_predict import redact_with_gpu_decode
 from privacy_filter_service.models import RedactionResult
 
 
@@ -42,7 +43,7 @@ class OPFEngine:
                 output_mode=self.output_mode,
                 decode_mode=self.decode_mode,
             )
-            smoke: str | OPFRedactionResult = opf.redact("test")
+            smoke: str | OPFRedactionResult = redact_with_gpu_decode(opf, "test")
             if isinstance(smoke, str):
                 raise TypeError("OPF.redact() returned text-only output during warmup")
             self._opf = opf
@@ -52,7 +53,7 @@ class OPFEngine:
         await self.warmup()
         async with self._lock:
             opf = self._require_opf()
-            result: str | OPFRedactionResult = opf.redact(text)
+            result: str | OPFRedactionResult = redact_with_gpu_decode(opf, text)
             if isinstance(result, str):
                 raise TypeError("OPF.redact() returned text-only output")
             return RedactionResult.model_validate(result.to_dict())
@@ -63,7 +64,7 @@ class OPFEngine:
             opf = self._require_opf()
             results: list[RedactionResult] = []
             for text in texts:
-                result: str | OPFRedactionResult = opf.redact(text)
+                result: str | OPFRedactionResult = redact_with_gpu_decode(opf, text)
                 if isinstance(result, str):
                     raise TypeError("OPF.redact() returned text-only output")
                 results.append(RedactionResult.model_validate(result.to_dict()))
