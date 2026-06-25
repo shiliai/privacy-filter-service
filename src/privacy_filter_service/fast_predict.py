@@ -52,12 +52,18 @@ def predict_text_gpu_decode(
     text: str,
     *,
     decoder: ViterbiCRFDecoder | None,
+    use_jit: bool = True,
 ) -> PredictionResult:
     """Run one text through the model and decode on the model's device.
 
     This mirrors ``opf._core.runtime.predict_text`` except that log-probs are
     kept on ``runtime.device`` and Viterbi decoding uses the batched CUDA
     path when a GPU is available.
+
+    Args:
+        use_jit: If True, use the JIT-compiled ``viterbi_decode_scan``.
+            If False, fall back to OPF's ``decode_many`` (useful for
+            benchmarking the intermediate optimization).
     """
     token_ids = tuple(
         int(tok) for tok in runtime.encoding.encode(text, allowed_special="all")
@@ -132,18 +138,24 @@ def predict_text_gpu_decode(
 
     stacked_scores = torch.stack(token_score_vectors, dim=0)
     if decoder is not None:
-        # Use JIT-compiled GPU Viterbi decode for single-batch path.
         device = runtime.device
-        start_scores = decoder._start_scores.to(device=device, dtype=stacked_scores.dtype)
-        end_scores = decoder._end_scores.to(device=device, dtype=stacked_scores.dtype)
-        transition_scores = decoder._transition_scores.to(
-            device=device, dtype=stacked_scores.dtype
-        )
-        emissions_b = stacked_scores.unsqueeze(0)  # (1, T, C)
-        decoded_tensor = viterbi_decode_scan(
-            emissions_b, transition_scores, start_scores, end_scores
-        )
-        decoded_labels = decoded_tensor[0].tolist()
+        if use_jit:
+            # JIT-compiled GPU Viterbi decode.
+            start_scores = decoder._start_scores.to(
+                device=device, dtype=stacked_scores.dtype
+            )
+            end_scores = decoder._end_scores.to(device=device, dtype=stacked_scores.dtype)
+            transition_scores = decoder._transition_scores.to(
+                device=device, dtype=stacked_scores.dtype
+            )
+            emissions_b = stacked_scores.unsqueeze(0)  # (1, T, C)
+            decoded_tensor = viterbi_decode_scan(
+                emissions_b, transition_scores, start_scores, end_scores
+            )
+            decoded_labels = decoded_tensor[0].tolist()
+        else:
+            # OPF's batched CUDA decode_many (intermediate optimization).
+            decoded_labels = decoder.decode_many([stacked_scores], device=device)[0]
         if len(decoded_labels) != len(token_positions):
             decoded_labels = stacked_scores.argmax(dim=1).tolist()
     else:
