@@ -1,0 +1,219 @@
+{
+  "system_info": {
+    "cpu": {
+      "model": "Intel(R) Xeon(R) Platinum 8260L CPU @ 2.40GHz",
+      "logical_cores": 24
+    },
+    "gpu": {
+      "name": "NVIDIA RTX A6000",
+      "driver": "560.28.03",
+      "memory_total_mb": 49140,
+      "memory_used_mb": 17506,
+      "utilization_percent": 9.0
+    },
+    "memory_gb": {
+      "total": 62.76
+    },
+    "os": {
+      "kernel": "5.15.0-164-generic",
+      "hostname": "M2S2VMUbuntuA6000"
+    },
+    "pytorch": {
+      "torch_version": "2.6.0+cu126",
+      "cuda_available": true,
+      "cuda_version": "12.6",
+      "device_name": "NVIDIA RTX A6000",
+      "device_count": 1
+    },
+    "gpu_processes": [
+      {
+        "pid": "2658509",
+        "name": "VLLM::EngineCore",
+        "used_memory_mb": 10086
+      },
+      {
+        "pid": "2374931",
+        "name": "/home/shili-dev/project/privacy-filter-service/.venv/bin/python3",
+        "used_memory_mb": 3902
+      },
+      {
+        "pid": "3054318",
+        "name": "python",
+        "used_memory_mb": 3496
+      }
+    ]
+  },
+  "base_text": "Test doc with email <PRIVATE_EMAIL> and phone <PRIVATE_PHONE>. ",
+  "timeout_ms": 5000.0,
+  "num_runs": 30,
+  "results": [
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "n": 30,
+      "p50_ms": 498.82525857537985,
+      "p95_ms": 568.4987425804138,
+      "p99_ms": 574.7788043878973,
+      "max_ms": 574.8968422412872,
+      "mean_ms": 505.16899103919667,
+      "std_ms": 25.951802603936436,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "n": 30,
+      "p50_ms": 1206.8435214459896,
+      "p95_ms": 2510.281369369477,
+      "p99_ms": 2537.6091761142015,
+      "max_ms": 2541.6369903832674,
+      "mean_ms": 1214.3589007978637,
+      "std_ms": 1040.9869333745835,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "n": 30,
+      "p50_ms": 844.4419428706169,
+      "p95_ms": 4924.6562781743705,
+      "p99_ms": 4995.972805526108,
+      "max_ms": 5006.0443468391895,
+      "mean_ms": 1899.2761970187228,
+      "std_ms": 1994.3083983029708,
+      "over_timeout_ms": 1,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 18900,
+      "text_tokens": 4201,
+      "n": 30,
+      "p50_ms": 549.9082338064909,
+      "p95_ms": 13830.901952832937,
+      "p99_ms": 14363.809278849512,
+      "max_ms": 14548.56188595295,
+      "mean_ms": 3323.1699641793966,
+      "std_ms": 4917.468656383064,
+      "over_timeout_ms": 6,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 37800,
+      "text_tokens": 8401,
+      "n": 30,
+      "p50_ms": 2600.1916183158755,
+      "p95_ms": 25788.65669993683,
+      "p99_ms": 26694.074013642967,
+      "max_ms": 26716.29949659109,
+      "mean_ms": 7472.087231340508,
+      "std_ms": 9531.58852938661,
+      "over_timeout_ms": 10,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 75600,
+      "text_tokens": 16801,
+      "n": 30,
+      "p50_ms": 26626.356889493763,
+      "p95_ms": 49311.35588260367,
+      "p99_ms": 51915.24605644867,
+      "max_ms": 52603.63812930882,
+      "mean_ms": 23295.375843097765,
+      "std_ms": 17299.362240543014,
+      "over_timeout_ms": 21,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "n": 30,
+      "p50_ms": 30.374146066606045,
+      "p95_ms": 31.597936525940895,
+      "p99_ms": 31.95852605625987,
+      "max_ms": 32.09826350212097,
+      "mean_ms": 30.46573344618082,
+      "std_ms": 0.7317738316666292,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "n": 30,
+      "p50_ms": 76.40976458787918,
+      "p95_ms": 93.9944749698042,
+      "p99_ms": 125.89279029518369,
+      "max_ms": 133.66954028606415,
+      "mean_ms": 79.14535297701757,
+      "std_ms": 11.583517401518916,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "n": 30,
+      "p50_ms": 147.62110821902752,
+      "p95_ms": 151.60199385136366,
+      "p99_ms": 174.9142273142934,
+      "max_ms": 184.4332106411457,
+      "mean_ms": 148.8542982687553,
+      "std_ms": 6.988831595412004,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 18900,
+      "text_tokens": 4201,
+      "n": 30,
+      "p50_ms": 409.2240035533905,
+      "p95_ms": 449.1950866766273,
+      "p99_ms": 466.87727661803365,
+      "max_ms": 467.03992038965225,
+      "mean_ms": 413.1055507188042,
+      "std_ms": 16.2076868626117,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 37800,
+      "text_tokens": 8401,
+      "n": 30,
+      "p50_ms": 815.1831980794668,
+      "p95_ms": 882.0105085149406,
+      "p99_ms": 900.5578795261681,
+      "max_ms": 904.0560442954302,
+      "mean_ms": 821.1493400235971,
+      "std_ms": 31.966049430553543,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 75600,
+      "text_tokens": 16801,
+      "n": 30,
+      "p50_ms": 1624.8989989981055,
+      "p95_ms": 1714.8776247166097,
+      "p99_ms": 1723.58283162117,
+      "max_ms": 1726.5184950083494,
+      "mean_ms": 1631.831092076997,
+      "std_ms": 46.57172686168218,
+      "over_timeout_ms": 0,
+      "timeout_ms": 5000.0
+    }
+  ]
+}
