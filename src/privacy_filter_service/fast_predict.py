@@ -40,6 +40,8 @@ from opf._core.spans import (
     trim_char_spans_whitespace,
 )
 
+from privacy_filter_service.viterbi_gpu import viterbi_decode_scan
+
 if TYPE_CHECKING:
     from opf._api import OPF
 
@@ -130,10 +132,18 @@ def predict_text_gpu_decode(
 
     stacked_scores = torch.stack(token_score_vectors, dim=0)
     if decoder is not None:
-        # Use the batched CUDA decoder path when possible.
-        decoded_labels = decoder.decode_many(
-            [stacked_scores], device=runtime.device
-        )[0]
+        # Use JIT-compiled GPU Viterbi decode for single-batch path.
+        device = runtime.device
+        start_scores = decoder._start_scores.to(device=device, dtype=stacked_scores.dtype)
+        end_scores = decoder._end_scores.to(device=device, dtype=stacked_scores.dtype)
+        transition_scores = decoder._transition_scores.to(
+            device=device, dtype=stacked_scores.dtype
+        )
+        emissions_b = stacked_scores.unsqueeze(0)  # (1, T, C)
+        decoded_tensor = viterbi_decode_scan(
+            emissions_b, transition_scores, start_scores, end_scores
+        )
+        decoded_labels = decoded_tensor[0].tolist()
         if len(decoded_labels) != len(token_positions):
             decoded_labels = stacked_scores.argmax(dim=1).tolist()
     else:
