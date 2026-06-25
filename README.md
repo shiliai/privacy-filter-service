@@ -65,6 +65,7 @@ port = 8765                 # 监听端口 (1-65535)
 device = "cuda"             # "cuda" 或 "cpu"
 output_mode = "typed"       # "typed" (带标签) 或 "redacted" (折叠)
 decode_mode = "viterbi"     # "viterbi" 或 "argmax"
+decode_backend = "upstream" # "upstream" 或 "jit_gpu"
 model_path = ""             # 必填 — OPF 模型路径 (或设 OPF_CHECKPOINT 环境变量)
 log_level = "INFO"          # Python 日志级别
 
@@ -74,6 +75,14 @@ request_timeout_s = 5.0             # hook HTTP 超时 (1-60 秒)
 max_file_bytes = 262144             # hook 发送的最大文件大小 (≤ 1MB)
 max_inflight_warns_per_5min = 1     # 警告频率限制
 ```
+
+推荐按部署环境选择以下三种配置：
+
+| 场景 | `device` | `decode_backend` | `max_file_bytes` | 说明 |
+|---|---|---|---:|---|
+| 当前/本地 GPU host | `cuda` | `upstream` | `262144` | GPU forward + upstream CPU Viterbi，RTX 3090 本机最快 |
+| 多租户 GPU host | `cuda` | `jit_gpu` | `262144` | GPU forward + GPU JIT Viterbi，用于避免 A6000/VLLM 上的 CPU decode 尾延迟 |
+| CPU-only host | `cpu` | `upstream` | `1024` | 全 CPU 推理很慢，服务启动时强制 `max_file_bytes <= 1024` |
 
 ### 环境变量覆盖
 
@@ -86,6 +95,7 @@ max_inflight_warns_per_5min = 1     # 警告频率限制
 | `PRIVACY_FILTER_DEVICE` | `service.device` | str |
 | `PRIVACY_FILTER_OUTPUT_MODE` | `service.output_mode` | str |
 | `PRIVACY_FILTER_DECODE_MODE` | `service.decode_mode` | str |
+| `PRIVACY_FILTER_DECODE_BACKEND` | `service.decode_backend` | str |
 | `PRIVACY_FILTER_MODEL_PATH` | `service.model_path` | str |
 | `PRIVACY_FILTER_LOG_LEVEL` | `service.log_level` | str |
 | `PRIVACY_FILTER_URL` | `hook.base_url` | str |
@@ -142,6 +152,7 @@ curl -fsS http://127.0.0.1:8765/model-info
   "labels": ["account_number", "private_address", "private_email", "private_person", "private_phone", "private_url", "private_date", "secret"],
   "output_mode": "typed",
   "decode_mode": "viterbi",
+  "decode_backend": "upstream",
   "version": "0.1.0"
 }
 ```
@@ -251,6 +262,7 @@ journalctl --user -u privacy-filter -n 50
 常见原因:
 - **模型目录不存在** — 确认 `/mnt/LLM/OpenAI/privacy_filter` 存在
 - **CUDA 不可用** — 改 `device = "cpu"` 或检查 GPU 驱动
+- **CPU 配置过大** — `device = "cpu"` 时必须设置 `max_file_bytes <= 1024`
 - **配置文件不存在** — 重新运行 `install/install-service.sh`
 
 ### Hook 冲突
@@ -283,6 +295,7 @@ Partial staging not supported in v1. Either fully stage (git add <file>) or unst
 - **仅 CLI 测试** — hooks 仅在 git CLI 测试过，GUI 客户端行为可能不同
 - **单进程** — 服务运行单个 worker，请求串行处理
 - **256KB 文件限制** — 超过 `max_file_bytes`（默认 262144）的文件被跳过
+- **CPU-only 限制** — `device = "cpu"` 时 `max_file_bytes` 最高为 1024 bytes
 
 ---
 

@@ -22,6 +22,9 @@ class OPFEngine:
         self.device: Literal["cuda", "cpu"] = service_settings.device
         self.output_mode: Literal["typed", "redacted"] = service_settings.output_mode
         self.decode_mode: Literal["viterbi", "argmax"] = service_settings.decode_mode
+        self.decode_backend: Literal["upstream", "jit_gpu"] = (
+            service_settings.decode_backend
+        )
         self.model_path: str = service_settings.model_path
         self.ready: bool = False
         self._opf: OPF | None = None
@@ -43,7 +46,7 @@ class OPFEngine:
                 output_mode=self.output_mode,
                 decode_mode=self.decode_mode,
             )
-            smoke: str | OPFRedactionResult = redact_with_gpu_decode(opf, "test")
+            smoke: str | OPFRedactionResult = self._redact_with_backend(opf, "test")
             if isinstance(smoke, str):
                 raise TypeError("OPF.redact() returned text-only output during warmup")
             self._opf = opf
@@ -53,7 +56,7 @@ class OPFEngine:
         await self.warmup()
         async with self._lock:
             opf = self._require_opf()
-            result: str | OPFRedactionResult = redact_with_gpu_decode(opf, text)
+            result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
             if isinstance(result, str):
                 raise TypeError("OPF.redact() returned text-only output")
             return RedactionResult.model_validate(result.to_dict())
@@ -64,11 +67,16 @@ class OPFEngine:
             opf = self._require_opf()
             results: list[RedactionResult] = []
             for text in texts:
-                result: str | OPFRedactionResult = redact_with_gpu_decode(opf, text)
+                result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
                 if isinstance(result, str):
                     raise TypeError("OPF.redact() returned text-only output")
                 results.append(RedactionResult.model_validate(result.to_dict()))
             return results
+
+    def _redact_with_backend(self, opf: OPF, text: str) -> str | OPFRedactionResult:
+        if self.decode_backend == "upstream":
+            return opf.redact(text)
+        return redact_with_gpu_decode(opf, text)
 
     def _require_opf(self) -> OPF:
         if self._opf is None:

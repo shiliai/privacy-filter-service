@@ -96,6 +96,7 @@ Runtime model metadata. Does NOT expose `model_path` (security: avoids leaking f
   ],
   "output_mode": "typed",
   "decode_mode": "viterbi",
+  "decode_backend": "upstream",
   "version": "0.1.0"
 }
 ```
@@ -326,6 +327,7 @@ class ModelInfoResponse(BaseModel):
     labels: list[str]    # All 8 PII label names
     output_mode: str     # "typed" or "redacted"
     decode_mode: str     # "viterbi" or "argmax"
+    decode_backend: str  # "upstream" or "jit_gpu"
     version: str         # "0.1.0"
     # NOTE: model_path and checkpoint are intentionally excluded (security)
 ```
@@ -365,6 +367,7 @@ port = 8765                 # Listen port (1-65535)
 device = "cuda"             # "cuda" or "cpu"
 output_mode = "typed"       # "typed" (with labels) or "redacted" (collapsed)
 decode_mode = "viterbi"     # "viterbi" or "argmax"
+decode_backend = "upstream" # "upstream" or "jit_gpu"
 model_path = ""             # REQUIRED — path to OPF checkpoint dir
 log_level = "INFO"          # Python logging level
 
@@ -386,6 +389,7 @@ All config keys can be overridden by env vars (loaded after TOML):
 | `PRIVACY_FILTER_DEVICE` | `service.device` | str |
 | `PRIVACY_FILTER_OUTPUT_MODE` | `service.output_mode` | str |
 | `PRIVACY_FILTER_DECODE_MODE` | `service.decode_mode` | str |
+| `PRIVACY_FILTER_DECODE_BACKEND` | `service.decode_backend` | str |
 | `PRIVACY_FILTER_MODEL_PATH` | `service.model_path` | str |
 | `PRIVACY_FILTER_LOG_LEVEL` | `service.log_level` | str |
 | `PRIVACY_FILTER_URL` | `hook.base_url` | str |
@@ -396,13 +400,24 @@ All config keys can be overridden by env vars (loaded after TOML):
 
 Resolution order: TOML → `PRIVACY_FILTER_*` env → `OPF_CHECKPOINT` fallback.
 
+### Recommended deployment profiles
+
+| Scenario | `device` | `decode_backend` | `max_file_bytes` | Notes |
+|----------|----------|------------------|------------------|-------|
+| Current/local GPU host | `cuda` | `upstream` | `262144` | GPU forward + upstream CPU Viterbi; fastest on the local RTX 3090 host. |
+| Multi-tenant GPU host | `cuda` | `jit_gpu` | `262144` | GPU forward + GPU JIT Viterbi; avoids A6000/VLLM CPU-decode tail latency. |
+| CPU-only host | `cpu` | `upstream` | `1024` | Full CPU inference; service config validation rejects larger single-text limits. |
+
 ### Validation rules
 
 - `port`: 1–65535
 - `device`: `cuda` or `cpu`
 - `output_mode`: `typed` or `redacted`
 - `decode_mode`: `viterbi` or `argmax`
+- `decode_backend`: `upstream` or `jit_gpu`
+- `decode_backend=jit_gpu` requires `device=cuda`
 - `max_file_bytes`: <= 1048576 (1 MB)
+- `device=cpu` requires `max_file_bytes <= 1024`
 - `request_timeout_s`: 1–60
 - `model_path`: **required** (no silent fallback)
 - Crashes with `SystemExit` on invalid config (fail-fast)
@@ -796,6 +811,7 @@ def _register_routes(app: FastAPI) -> None:
             labels=list(LABELS),
             output_mode=engine.output_mode,
             decode_mode=engine.decode_mode,
+            decode_backend=engine.decode_backend,
             version="0.1.0",
         )
 
@@ -934,7 +950,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 OPF_CHECKPOINT_ENV = "OPF_CHECKPOINT"
 PRIVACY_FILTER_CONFIG_ENV = "PRIVACY_FILTER_CONFIG"
@@ -945,6 +961,7 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PRIVACY_FILTER_DEVICE": "service.device",
     "PRIVACY_FILTER_OUTPUT_MODE": "service.output_mode",
     "PRIVACY_FILTER_DECODE_MODE": "service.decode_mode",
+    "PRIVACY_FILTER_DECODE_BACKEND": "service.decode_backend",
     "PRIVACY_FILTER_MODEL_PATH": "service.model_path",
     "PRIVACY_FILTER_LOG_LEVEL": "service.log_level",
     "PRIVACY_FILTER_URL": "hook.base_url",
@@ -992,6 +1009,7 @@ class ServiceConfig(BaseModel):
     device: Literal["cuda", "cpu"] = "cuda"
     output_mode: Literal["typed", "redacted"] = "typed"
     decode_mode: Literal["viterbi", "argmax"] = "viterbi"
+    decode_backend: Literal["upstream", "jit_gpu"] = "upstream"
     model_path: str
     log_level: str = "INFO"
 
@@ -1010,6 +1028,16 @@ class Settings(BaseModel):
 
     service: ServiceConfig
     hook: HookConfig = Field(default_factory=HookConfig)
+
+    @model_validator(mode="after")
+    def validate_backend_constraints(self) -> Settings:
+        if self.service.decode_backend == "jit_gpu" and self.service.device != "cuda":
+            raise ValueError('decode_backend="jit_gpu" requires service.device="cuda"')
+        if self.service.device == "cpu" and self.hook.max_file_bytes > 1024:
+            raise ValueError(
+                'service.device="cpu" requires hook.max_file_bytes <= 1024'
+            )
+        return self
 
 
 def load_settings(
@@ -1072,6 +1100,7 @@ from fastapi import Depends
 from opf._api import OPF, RedactionResult as OPFRedactionResult
 
 from privacy_filter_service.config import ServiceConfig, Settings, load_settings
+from privacy_filter_service.fast_predict import redact_with_gpu_decode
 from privacy_filter_service.models import RedactionResult
 
 
@@ -1082,6 +1111,9 @@ class OPFEngine:
         self.device: Literal["cuda", "cpu"] = service_settings.device
         self.output_mode: Literal["typed", "redacted"] = service_settings.output_mode
         self.decode_mode: Literal["viterbi", "argmax"] = service_settings.decode_mode
+        self.decode_backend: Literal["upstream", "jit_gpu"] = (
+            service_settings.decode_backend
+        )
         self.model_path: str = service_settings.model_path
         self.ready: bool = False
         self._opf: OPF | None = None
@@ -1103,7 +1135,7 @@ class OPFEngine:
                 output_mode=self.output_mode,
                 decode_mode=self.decode_mode,
             )
-            smoke: str | OPFRedactionResult = opf.redact("test")
+            smoke: str | OPFRedactionResult = self._redact_with_backend(opf, "test")
             if isinstance(smoke, str):
                 raise TypeError("OPF.redact() returned text-only output during warmup")
             self._opf = opf
@@ -1113,7 +1145,7 @@ class OPFEngine:
         await self.warmup()
         async with self._lock:
             opf = self._require_opf()
-            result: str | OPFRedactionResult = opf.redact(text)
+            result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
             if isinstance(result, str):
                 raise TypeError("OPF.redact() returned text-only output")
             return RedactionResult.model_validate(result.to_dict())
@@ -1124,11 +1156,16 @@ class OPFEngine:
             opf = self._require_opf()
             results: list[RedactionResult] = []
             for text in texts:
-                result: str | OPFRedactionResult = opf.redact(text)
+                result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
                 if isinstance(result, str):
                     raise TypeError("OPF.redact() returned text-only output")
                 results.append(RedactionResult.model_validate(result.to_dict()))
             return results
+
+    def _redact_with_backend(self, opf: OPF, text: str) -> str | OPFRedactionResult:
+        if self.decode_backend == "upstream":
+            return opf.redact(text)
+        return redact_with_gpu_decode(opf, text)
 
     def _require_opf(self) -> OPF:
         if self._opf is None:
@@ -1241,6 +1278,7 @@ class ModelInfoResponse(BaseModel):
     labels: list[str]
     output_mode: str
     decode_mode: str
+    decode_backend: str
     version: str
 ```
 
