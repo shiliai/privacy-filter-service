@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Benchmark privacy-filter-service redaction latency and accuracy.
 
-This script compares three decode configurations on the local host:
+This script compares four decode configurations on the local host:
 
-1. ``cpu`` - original OPF CPU Viterbi decode (ground truth).
-2. ``decode_many`` - GPU batched Viterbi via OPF's decode_many.
-3. ``jit`` - JIT-compiled GPU Viterbi via viterbi_decode_scan.
+1. ``cpu_full`` - model forward + Viterbi decode on CPU.
+2. ``cuda_cpu_viterbi`` - model forward on GPU, upstream Viterbi on CPU.
+3. ``cuda_decode_many`` - GPU batched Viterbi via OPF's decode_many.
+4. ``cuda_jit`` - JIT-compiled GPU Viterbi via viterbi_decode_scan.
 
 Run from the repo root with the virtual environment activated:
 
@@ -28,18 +29,14 @@ from typing import Literal
 
 import torch
 
-# Ensure project src is importable when run from repo root.
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
 from opf._api import OPF
-from opf._core.runtime import predict_text as predict_text_cpu
+from opf._core.runtime import predict_text as predict_text_upstream
 from privacy_filter_service.config import load_settings
 from privacy_filter_service.fast_predict import predict_text_gpu_decode
 
 
-MODES = ("cpu", "decode_many", "jit")
-Mode = Literal["cpu", "decode_many", "jit"]
+MODES = ("cpu_full", "cuda_cpu_viterbi", "cuda_decode_many", "cuda_jit")
+Mode = Literal["cpu_full", "cuda_cpu_viterbi", "cuda_decode_many", "cuda_jit"]
 
 
 @dataclass
@@ -128,6 +125,11 @@ def get_system_info() -> dict:
     return info
 
 
+def synchronize_cuda() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
 def benchmark_mode(
     mode: Mode,
     texts: list[tuple[int, str]],
@@ -140,9 +142,9 @@ def benchmark_mode(
     """Run benchmark for one decode mode."""
     runtime, decoder = opf_gpu.get_prediction_components()
 
-    if mode == "cpu":
+    if mode == "cpu_full":
         if opf_cpu is None:
-            raise RuntimeError("CPU OPF instance required for cpu mode")
+            raise RuntimeError("CPU OPF instance required for cpu_full mode")
         runtime_cpu, decoder_cpu = opf_cpu.get_prediction_components()
 
     results: list[BenchmarkResult] = []
@@ -153,24 +155,29 @@ def benchmark_mode(
 
         if warmup:
             # Dry run to warm caches.
-            if mode == "cpu":
-                predict_text_cpu(runtime_cpu, text, decoder=decoder_cpu)
+            if mode == "cpu_full":
+                predict_text_upstream(runtime_cpu, text, decoder=decoder_cpu)
+            elif mode == "cuda_cpu_viterbi":
+                predict_text_upstream(runtime, text, decoder=decoder)
             else:
-                predict_text_gpu_decode(runtime, text, decoder=decoder, use_jit=(mode == "jit"))
+                predict_text_gpu_decode(runtime, text, decoder=decoder, use_jit=(mode == "cuda_jit"))
+            synchronize_cuda()
 
         # Timed runs.
         durations: list[float] = []
         spans: list[tuple[int, int, str]] = []
         for _ in range(num_runs):
+            synchronize_cuda()
             t0 = time.monotonic()
-            if mode == "cpu":
-                pred = predict_text_cpu(runtime_cpu, text, decoder=decoder_cpu)
+            if mode == "cpu_full":
+                pred = predict_text_upstream(runtime_cpu, text, decoder=decoder_cpu)
+            elif mode == "cuda_cpu_viterbi":
+                pred = predict_text_upstream(runtime, text, decoder=decoder)
             else:
                 pred = predict_text_gpu_decode(
-                    runtime, text, decoder=decoder, use_jit=(mode == "jit")
+                    runtime, text, decoder=decoder, use_jit=(mode == "cuda_jit")
                 )
-            if torch.cuda.is_available():
-                torch.cuda.synchronize()
+            synchronize_cuda()
             durations.append((time.monotonic() - t0) * 1000)
             spans = [(s.start, s.end, s.label) for s in pred.spans]
 
@@ -284,7 +291,7 @@ def main() -> int:
         )
         runtime_cpu, decoder_cpu = opf_cpu.get_prediction_components()
         # Ensure tiktoken cache is loaded.
-        predict_text_cpu(runtime_cpu, args.base_text, decoder=decoder_cpu)
+        predict_text_upstream(runtime_cpu, args.base_text, decoder=decoder_cpu)
 
     # GPU instance is used for both decode_many and jit modes.
     print("Warming up GPU instance...", file=sys.stderr)
@@ -294,22 +301,26 @@ def main() -> int:
         output_mode="typed",
         decode_mode="viterbi",
     )
+    runtime_gpu, decoder_gpu = opf_gpu.get_prediction_components()
+    predict_text_upstream(runtime_gpu, args.base_text, decoder=decoder_gpu)
+    predict_text_gpu_decode(runtime_gpu, args.base_text, decoder=decoder_gpu, use_jit=True)
+    synchronize_cuda()
 
     all_results: list[BenchmarkResult] = []
 
     if not args.skip_cpu:
         print("Benchmarking CPU baseline...", file=sys.stderr)
         cpu_results_list = benchmark_mode(
-            "cpu", cpu_texts, opf_gpu, opf_cpu, cpu_results=None, num_runs=1, warmup=False
+            "cpu_full", cpu_texts, opf_gpu, opf_cpu, cpu_results=None, num_runs=1, warmup=False
         )
         for (repeats, text), r in zip(cpu_texts, cpu_results_list):
             # Store spans for accuracy comparison.
             runtime_cpu, decoder_cpu = opf_cpu.get_prediction_components()
-            pred = predict_text_cpu(runtime_cpu, text, decoder=decoder_cpu)
+            pred = predict_text_upstream(runtime_cpu, text, decoder=decoder_cpu)
             cpu_results[repeats] = [(s.start, s.end, s.label) for s in pred.spans]
         all_results.extend(cpu_results_list)
 
-    for mode in ("decode_many", "jit"):
+    for mode in ("cuda_cpu_viterbi", "cuda_decode_many", "cuda_jit"):
         print(f"Benchmarking {mode}...", file=sys.stderr)
         results = benchmark_mode(
             mode, gpu_texts, opf_gpu, opf_cpu, cpu_results=cpu_results, num_runs=3, warmup=True

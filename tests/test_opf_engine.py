@@ -50,6 +50,23 @@ def _opf_result(text: str, span_count: int = 1) -> SimpleNamespace:
     )
 
 
+def _patch_redact_with_gpu_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    calls: list[tuple[str, str]] | None = None,
+    *,
+    span_count: int = 1,
+    return_text_only: bool = False,
+) -> None:
+    def fake_redact_with_gpu_decode(opf: object, text: str) -> SimpleNamespace | str:
+        if calls is not None:
+            calls.append(("redact", text))
+        if return_text_only:
+            return text
+        return _opf_result(text, span_count=span_count)
+
+    monkeypatch.setattr(opf_engine, "redact_with_gpu_decode", fake_redact_with_gpu_decode)
+
+
 @pytest.fixture(autouse=True)
 def reset_engine_singleton() -> None:
     opf_engine._engine = None
@@ -63,11 +80,8 @@ async def test_warmup_initializes_opf_and_marks_ready(monkeypatch: pytest.Monkey
         def __init__(self, **kwargs: str) -> None:
             calls.append(("init", kwargs["device"]))
 
-        def redact(self, text: str) -> SimpleNamespace:
-            calls.append(("redact", text))
-            return _opf_result(text)
-
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+    _patch_redact_with_gpu_decode(monkeypatch, calls)
 
     engine = opf_engine.OPFEngine(_service_config())
     await engine.warmup()
@@ -82,10 +96,8 @@ async def test_redact_converts_opf_result_to_pydantic(monkeypatch: pytest.Monkey
         def __init__(self, **_: str) -> None:
             pass
 
-        def redact(self, text: str) -> SimpleNamespace:
-            return _opf_result(text, span_count=2)
-
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+    _patch_redact_with_gpu_decode(monkeypatch, span_count=2)
 
     engine = opf_engine.OPFEngine(_service_config())
     result = await engine.redact("Alice")
@@ -102,11 +114,13 @@ async def test_redact_batch_serializes_and_preserves_order(monkeypatch: pytest.M
         def __init__(self, **_: str) -> None:
             pass
 
-        def redact(self, text: str) -> SimpleNamespace:
-            seen.append(text)
-            return _opf_result(text)
-
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+
+    def fake_redact_with_gpu_decode(opf: object, text: str) -> SimpleNamespace:
+        seen.append(text)
+        return _opf_result(text)
+
+    monkeypatch.setattr(opf_engine, "redact_with_gpu_decode", fake_redact_with_gpu_decode)
 
     engine = opf_engine.OPFEngine(_service_config())
     results = await engine.redact_batch(["one", "two", "three"])
@@ -125,18 +139,19 @@ async def test_concurrent_redact_calls_share_lock(monkeypatch: pytest.MonkeyPatc
         def __init__(self, **_: str) -> None:
             pass
 
-        def redact(self, text: str) -> SimpleNamespace:
-            nonlocal active, max_active
-            active += 1
-            max_active = max(max_active, active)
-            seen.append(text)
-            import time
+    def fake_redact_with_gpu_decode(opf: object, text: str) -> SimpleNamespace:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        seen.append(text)
+        import time
 
-            time.sleep(0.01)
-            active -= 1
-            return _opf_result(text)
+        time.sleep(0.01)
+        active -= 1
+        return _opf_result(text)
 
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+    monkeypatch.setattr(opf_engine, "redact_with_gpu_decode", fake_redact_with_gpu_decode)
 
     engine = opf_engine.OPFEngine(_service_config())
     await engine.warmup()
@@ -155,10 +170,8 @@ async def test_get_engine_returns_singleton(monkeypatch: pytest.MonkeyPatch) -> 
             nonlocal init_count
             init_count += 1
 
-        def redact(self, text: str) -> SimpleNamespace:
-            return _opf_result(text)
-
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+    _patch_redact_with_gpu_decode(monkeypatch)
 
     settings = Settings(service=_service_config())
     first = await opf_engine.get_engine(settings)
@@ -174,10 +187,8 @@ async def test_warmup_raises_if_opf_returns_text_only(monkeypatch: pytest.Monkey
         def __init__(self, **_: str) -> None:
             pass
 
-        def redact(self, text: str) -> str:
-            return text
-
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+    _patch_redact_with_gpu_decode(monkeypatch, return_text_only=True)
 
     engine = opf_engine.OPFEngine(_service_config())
     with pytest.raises(TypeError, match="text-only"):
@@ -221,11 +232,9 @@ async def test_cuda_warmup_succeeds_when_gpu_available(monkeypatch: pytest.Monke
         def __init__(self, **kwargs: str) -> None:
             assert kwargs["device"] == "cuda"
 
-        def redact(self, text: str) -> SimpleNamespace:
-            return _opf_result(text)
-
     monkeypatch.setitem(sys.modules, "torch", FakeTorch)
     monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+    _patch_redact_with_gpu_decode(monkeypatch)
 
     engine = opf_engine.OPFEngine(_service_config(device="cuda"))
     await engine.warmup()

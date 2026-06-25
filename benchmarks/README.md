@@ -8,8 +8,6 @@ redaction latency and accuracy across decode implementations.
 From the repository root (with the virtual environment activated):
 
 ```bash
-cd /home/shili-dev/project/privacy-filter-service/.claude/worktrees/privacy-filter-gpu-decode
-source /home/shili-dev/project/privacy-filter-service/.venv/bin/activate
 PYTHONPATH=src python scripts/benchmark.py --output benchmarks/results.json
 ```
 
@@ -20,9 +18,10 @@ path given by `--output`.
 
 | Mode | Description |
 |---|---|
-| `cpu` | Original OPF Viterbi decode on CPU (used as accuracy ground truth). |
-| `decode_many` | GPU batched Viterbi via OPF's `ViterbiCRFDecoder.decode_many`. |
-| `jit` | JIT-compiled GPU Viterbi via `viterbi_decode_scan`. |
+| `cpu_full` | Model forward and Viterbi decode on CPU. |
+| `cuda_cpu_viterbi` | Model forward on GPU, then upstream OPF Viterbi on CPU. |
+| `cuda_decode_many` | GPU batched Viterbi via OPF's `ViterbiCRFDecoder.decode_many`. |
+| `cuda_jit` | JIT-compiled GPU Viterbi via `viterbi_decode_scan`. |
 
 ### Options
 
@@ -36,8 +35,9 @@ path given by `--output`.
 
 - `duration_ms`: Best of 3 runs after a warm-up pass.
 - `span_count`: Number of detected PII spans.
-- `accuracy_vs_cpu`: Fraction of CPU-detected spans also found by the GPU mode.
-  A value of `1.0` means the outputs are identical.
+- `accuracy_vs_cpu`: Fraction of `cpu_full` detected spans also found by the
+  compared mode when that repeat count was run on CPU. A value of `1.0` means
+  all baseline spans were recovered.
 
 ## Latest results
 

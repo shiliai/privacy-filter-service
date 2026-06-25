@@ -1,143 +1,111 @@
 {
   "system_info": {
     "cpu": {
-      "model": "Intel(R) Xeon(R) Platinum 8260L CPU @ 2.40GHz",
+      "model": "AMD Ryzen 9 3900X 12-Core Processor",
       "logical_cores": 24
     },
     "gpu": {
-      "name": "NVIDIA RTX A6000",
-      "driver": "560.28.03",
-      "memory_total_mb": 49140,
-      "memory_used_mb": 23154,
-      "utilization_percent": 24.0
+      "name": "NVIDIA GeForce RTX 3090",
+      "driver": "590.48.01",
+      "memory_total_mb": 24576,
+      "memory_used_mb": 19461,
+      "utilization_percent": 40.0
     },
     "memory_gb": {
-      "total": 62.76
+      "total": 62.71
     },
     "os": {
-      "kernel": "5.15.0-164-generic",
-      "hostname": "M2S2VMUbuntuA6000"
+      "kernel": "6.8.0-94-generic",
+      "hostname": "chriswang-X570-AORUS-ELITE"
     },
     "pytorch": {
-      "torch_version": "2.6.0+cu126",
+      "torch_version": "2.11.0+cu130",
       "cuda_available": true,
-      "cuda_version": "12.6",
-      "device_name": "NVIDIA RTX A6000",
+      "cuda_version": "13.0",
+      "device_name": "NVIDIA GeForce RTX 3090",
       "device_count": 1
     }
   },
-  "base_text": "Test doc with email <PRIVATE_EMAIL> and phone <PRIVATE_PHONE>
+  "base_text": "Test doc with email <PRIVATE_EMAIL> and phone <PRIVATE_PHONE>. ",
   "results": [
     {
-      "mode": "cpu",
-      "text_chars": 660,
-      "text_tokens": 201,
-      "duration_ms": 14674.786807969213,
-      "span_count": 20,
+      "mode": "cpu_full",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 7139.109781011939,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     },
     {
-      "mode": "cpu",
-      "text_chars": 1320,
-      "text_tokens": 401,
-      "duration_ms": 36385.572742670774,
-      "span_count": 40,
-      "accuracy_vs_cpu": null
-    },
-    {
-      "mode": "decode_many",
-      "text_chars": 660,
-      "text_tokens": 201,
-      "duration_ms": 97.07538969814777,
-      "span_count": 20,
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 19.682884216308594,
+      "span_count": 0,
       "accuracy_vs_cpu": 1.0
     },
     {
-      "mode": "decode_many",
-      "text_chars": 3300,
-      "text_tokens": 1001,
-      "duration_ms": 386.41184754669666,
-      "span_count": 100,
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "duration_ms": 40.00704921782017,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     },
     {
-      "mode": "decode_many",
-      "text_chars": 6600,
-      "text_tokens": 2001,
-      "duration_ms": 733.6290571838617,
-      "span_count": 200,
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "duration_ms": 66.95595756173134,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     },
     {
-      "mode": "decode_many",
-      "text_chars": 19800,
-      "text_tokens": 6001,
-      "duration_ms": 2306.6107761114836,
-      "span_count": 600,
-      "accuracy_vs_cpu": null
-    },
-    {
-      "mode": "decode_many",
-      "text_chars": 39600,
-      "text_tokens": 12001,
-      "duration_ms": 4479.935871437192,
-      "span_count": 1200,
-      "accuracy_vs_cpu": null
-    },
-    {
-      "mode": "decode_many",
-      "text_chars": 79200,
-      "text_tokens": 24001,
-      "duration_ms": 9264.573238790035,
-      "span_count": 2400,
-      "accuracy_vs_cpu": null
-    },
-    {
-      "mode": "jit",
-      "text_chars": 660,
-      "text_tokens": 201,
-      "duration_ms": 41.37662425637245,
-      "span_count": 20,
+      "mode": "cuda_decode_many",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 54.58742380142212,
+      "span_count": 0,
       "accuracy_vs_cpu": 1.0
     },
     {
-      "mode": "jit",
-      "text_chars": 3300,
-      "text_tokens": 1001,
-      "duration_ms": 109.04420167207718,
-      "span_count": 100,
+      "mode": "cuda_decode_many",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "duration_ms": 221.4438933879137,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     },
     {
-      "mode": "jit",
-      "text_chars": 6600,
-      "text_tokens": 2001,
-      "duration_ms": 220.52368335425854,
-      "span_count": 200,
+      "mode": "cuda_decode_many",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "duration_ms": 424.06633682549,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     },
     {
-      "mode": "jit",
-      "text_chars": 19800,
-      "text_tokens": 6001,
-      "duration_ms": 625.5110092461109,
-      "span_count": 600,
+      "mode": "cuda_jit",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 22.5759819149971,
+      "span_count": 0,
+      "accuracy_vs_cpu": 1.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "duration_ms": 62.275560572743416,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     },
     {
-      "mode": "jit",
-      "text_chars": 39600,
-      "text_tokens": 12001,
-      "duration_ms": 1303.389085456729,
-      "span_count": 1200,
-      "accuracy_vs_cpu": null
-    },
-    {
-      "mode": "jit",
-      "text_chars": 79200,
-      "text_tokens": 24001,
-      "duration_ms": 2590.2677197009325,
-      "span_count": 2400,
+      "mode": "cuda_jit",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "duration_ms": 114.4259013235569,
+      "span_count": 0,
       "accuracy_vs_cpu": null
     }
   ]

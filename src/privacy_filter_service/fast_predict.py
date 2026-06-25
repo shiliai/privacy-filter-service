@@ -19,12 +19,15 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F
 
-from opf._api import _redact_text
+from opf._api import _redact_text, _warning_for_prediction
+from opf._common.constants import SCHEMA_VERSION
 from opf._core.decoding import ViterbiCRFDecoder
 from opf._core.runtime import (
     DetectedSpan,
     InferenceRuntime,
     PredictionResult,
+    _apply_output_mode_to_detected_spans,
+    _label_placeholder,
     build_detection_summary,
 )
 from opf._core.sequence_labeling import (
@@ -43,7 +46,7 @@ from opf._core.spans import (
 from privacy_filter_service.viterbi_gpu import viterbi_decode_scan
 
 if TYPE_CHECKING:
-    from opf._api import OPF
+    from opf._api import OPF, RedactionResult as OPFRedactionResult
 
 
 @torch.inference_mode()
@@ -196,23 +199,20 @@ def predict_text_gpu_decode(
             if 0 <= int(label_idx) < len(runtime.label_info.span_class_names)
             else f"label_{label_idx}"
         )
-        normalized = "".join(
-            ch if ch.isalnum() else "_" for ch in label.upper()
-        ).strip("_")
-        if not normalized:
-            normalized = "REDACTED"
-        placeholder = f"<{normalized}>"
         detected.append(
             DetectedSpan(
                 label=label,
                 start=int(start),
                 end=int(end),
                 text=source_text[start:end],
-                placeholder=placeholder,
+                placeholder=_label_placeholder(label),
             )
         )
 
-    display_spans = _select_non_overlapping_spans(detected)
+    display_spans = _apply_output_mode_to_detected_spans(
+        _select_non_overlapping_spans(detected),
+        output_mode=runtime.output_mode,
+    )
     return PredictionResult(
         text=source_text,
         spans=tuple(display_spans),
@@ -237,7 +237,7 @@ def _select_non_overlapping_spans(spans: list[DetectedSpan]) -> list[DetectedSpa
     return kept
 
 
-def redact_with_gpu_decode(opf: "OPF", text: str) -> "str | opf._api.RedactionResult":
+def redact_with_gpu_decode(opf: "OPF", text: str) -> "str | OPFRedactionResult":
     """Run OPF redaction using the GPU-resident prediction path.
 
     This bypasses ``OPF.redact`` so we can inject ``predict_text_gpu_decode``.
@@ -255,10 +255,10 @@ def redact_with_gpu_decode(opf: "OPF", text: str) -> "str | opf._api.RedactionRe
         decoded_mismatch=prediction.decoded_mismatch,
     )
     return OPFRedactionResult(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         summary=summary,
         text=prediction.text,
         detected_spans=prediction.spans,
         redacted_text=redacted_text,
-        warning=None,
+        warning=_warning_for_prediction(prediction),
     )
