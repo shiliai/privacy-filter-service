@@ -49,9 +49,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = OPFEngine(settings.service)
     app.state.engine = engine
     app.state.start_time = time.monotonic()
-    log.info("warming up OPF engine (device=%s)", engine.device)
+    log.info(
+        "warming up OPF engine (device=%s, decode_backend=%s)",
+        engine.device,
+        engine.decode_backend,
+    )
     await engine.warmup()
-    log.info("OPF engine ready (device=%s)", engine.device)
+    log.info(
+        "OPF engine ready (device=%s, decode_backend=%s)",
+        engine.device,
+        engine.decode_backend,
+    )
     yield
     app.state.engine = None
 
@@ -119,6 +127,7 @@ def _register_routes(app: FastAPI) -> None:
             labels=list(LABELS),
             output_mode=engine.output_mode,
             decode_mode=engine.decode_mode,
+            decode_backend=engine.decode_backend,
             version="0.1.0",
         )
 

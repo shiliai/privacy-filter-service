@@ -1,0 +1,112 @@
+{
+  "system_info": {
+    "cpu": {
+      "model": "AMD Ryzen 9 3900X 12-Core Processor",
+      "logical_cores": 24
+    },
+    "gpu": {
+      "name": "NVIDIA GeForce RTX 3090",
+      "driver": "590.48.01",
+      "memory_total_mb": 24576,
+      "memory_used_mb": 19461,
+      "utilization_percent": 40.0
+    },
+    "memory_gb": {
+      "total": 62.71
+    },
+    "os": {
+      "kernel": "6.8.0-94-generic",
+      "hostname": "chriswang-X570-AORUS-ELITE"
+    },
+    "pytorch": {
+      "torch_version": "2.11.0+cu130",
+      "cuda_available": true,
+      "cuda_version": "13.0",
+      "device_name": "NVIDIA GeForce RTX 3090",
+      "device_count": 1
+    }
+  },
+  "base_text": "Test doc with email <PRIVATE_EMAIL> and phone <PRIVATE_PHONE>. ",
+  "results": [
+    {
+      "mode": "cpu_full",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 7139.109781011939,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 19.682884216308594,
+      "span_count": 0,
+      "accuracy_vs_cpu": 1.0
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "duration_ms": 40.00704921782017,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    },
+    {
+      "mode": "cuda_cpu_viterbi",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "duration_ms": 66.95595756173134,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    },
+    {
+      "mode": "cuda_decode_many",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 54.58742380142212,
+      "span_count": 0,
+      "accuracy_vs_cpu": 1.0
+    },
+    {
+      "mode": "cuda_decode_many",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "duration_ms": 221.4438933879137,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    },
+    {
+      "mode": "cuda_decode_many",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "duration_ms": 424.06633682549,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 630,
+      "text_tokens": 141,
+      "duration_ms": 22.5759819149971,
+      "span_count": 0,
+      "accuracy_vs_cpu": 1.0
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 3150,
+      "text_tokens": 701,
+      "duration_ms": 62.275560572743416,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    },
+    {
+      "mode": "cuda_jit",
+      "text_chars": 6300,
+      "text_tokens": 1401,
+      "duration_ms": 114.4259013235569,
+      "span_count": 0,
+      "accuracy_vs_cpu": null
+    }
+  ]
+}

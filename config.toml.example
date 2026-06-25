@@ -8,11 +8,27 @@ port = 8765                 # Listen port (1-65535)
 device = "cuda"              # "cuda" or "cpu"
 output_mode = "typed"    # "typed" or "redacted"
 decode_mode = "viterbi"     # "viterbi" or "argmax"
+decode_backend = "upstream" # "upstream" or "jit_gpu"; keep upstream unless GPU tail latency requires JIT
 model_path = ""             # REQUIRED — path to OPF checkpoint (or set OPF_CHECKPOINT env)
 log_level = "INFO"          # Python logging level
 
 [hook]
 base_url = "http://127.0.0.1:8765"  # Service URL the hook calls
-request_timeout_s = 5.0             # Hook HTTP timeout in seconds (1-60)
+request_timeout_s = 30.0            # Hook HTTP timeout in seconds (1-60)
 max_file_bytes = 262144             # Max file size the hook will send (≤ 1048576 = 1 MB)
 max_inflight_warns_per_5min = 1     # Rate-limit for inflight warnings
+
+# Recommended profiles:
+# 1. Current/local GPU host:
+#    service.device = "cuda"
+#    service.decode_backend = "upstream"
+#    hook.max_file_bytes = 262144
+# 2. Multi-tenant GPU host with upstream CPU-decode tail latency:
+#    service.device = "cuda"
+#    service.decode_backend = "jit_gpu"
+#    hook.max_file_bytes = 262144
+# 3. CPU-only host:
+#    service.device = "cpu"
+#    service.decode_backend = "upstream"
+#    hook.request_timeout_s = 30.0
+#    hook.max_file_bytes = 1024

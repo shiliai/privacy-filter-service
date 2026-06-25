@@ -168,6 +168,7 @@ class TestModelInfoResponse:
             labels=["private_person"],
             output_mode="typed",
             decode_mode="default",
+            decode_backend="upstream",
             version="0.1.0",
         )
         assert m.labels == ["private_person"]

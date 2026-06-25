@@ -18,8 +18,12 @@ port = 18765
 device = "cpu"
 output_mode = "typed"
 decode_mode = "viterbi"
+decode_backend = "upstream"
 model_path = "/tmp/fake-checkpoint"
 log_level = "WARNING"
+
+[hook]
+max_file_bytes = 1024
 """
 
 
@@ -46,6 +50,7 @@ def _mock_engine(results: list[RedactionResult] | None = None) -> MagicMock:
     engine.device = "cpu"
     engine.output_mode = "typed"
     engine.decode_mode = "viterbi"
+    engine.decode_backend = "upstream"
     if results is None:
         results = [
             _make_result("Hello world", "Hello world", 0),
@@ -144,7 +149,7 @@ class TestBatch:
     @pytest.mark.asyncio
     async def test_batch_oversized_text_returns_413(self, client):
         ac, engine = client
-        big_text = "x" * 300_000
+        big_text = "x" * 2_000
         resp = await ac.post("/redact/batch", json={"texts": ["short", big_text]})
         assert resp.status_code == 413
         assert "index 1" in resp.json()["detail"]
@@ -153,7 +158,7 @@ class TestBatch:
     @pytest.mark.asyncio
     async def test_batch_first_text_oversized(self, client):
         ac, engine = client
-        big_text = "x" * 300_000
+        big_text = "x" * 2_000
         resp = await ac.post("/redact/batch", json={"texts": [big_text, "short"]})
         assert resp.status_code == 413
         assert "index 0" in resp.json()["detail"]
@@ -161,7 +166,7 @@ class TestBatch:
     @pytest.mark.asyncio
     async def test_batch_no_raw_text_in_error(self, client):
         ac, engine = client
-        big_text = "secret@example.com" + "x" * 300_000
+        big_text = "secret@example.com" + "x" * 2_000
         resp = await ac.post("/redact/batch", json={"texts": [big_text]})
         assert resp.status_code == 413
         assert "secret@example.com" not in resp.text

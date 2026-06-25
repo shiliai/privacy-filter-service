@@ -107,4 +107,5 @@ class ModelInfoResponse(BaseModel):
     labels: list[str]
     output_mode: str
     decode_mode: str
+    decode_backend: str
     version: str

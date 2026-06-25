@@ -65,6 +65,7 @@ port = 8765                 # 监听端口 (1-65535)
 device = "cuda"             # "cuda" 或 "cpu"
 output_mode = "typed"       # "typed" (带标签) 或 "redacted" (折叠)
 decode_mode = "viterbi"     # "viterbi" 或 "argmax"
+decode_backend = "upstream" # "upstream" 或 "jit_gpu"
 model_path = ""             # 必填 — OPF 模型路径 (或设 OPF_CHECKPOINT 环境变量)
 log_level = "INFO"          # Python 日志级别
 
@@ -74,6 +75,61 @@ request_timeout_s = 5.0             # hook HTTP 超时 (1-60 秒)
 max_file_bytes = 262144             # hook 发送的最大文件大小 (≤ 1MB)
 max_inflight_warns_per_5min = 1     # 警告频率限制
 ```
+
+推荐按部署环境选择以下三种配置：
+
+| 场景 | `device` | `decode_backend` | `max_file_bytes` | 说明 |
+|---|---|---|---:|---|
+| 当前/本地 GPU host | `cuda` | `upstream` | `262144` | GPU forward + upstream CPU Viterbi，RTX 3090 本机最快 |
+| 多租户 GPU host | `cuda` | `jit_gpu` | `262144` | GPU forward + GPU JIT Viterbi，用于避免 A6000/VLLM 上的 CPU decode 尾延迟 |
+| CPU-only host | `cpu` | `upstream` | `1024` | 全 CPU 推理很慢，服务启动时强制 `max_file_bytes <= 1024` |
+
+### 部署前检查
+
+部署或改配置前先确认当前环境，不要直接覆盖已有配置：
+
+```bash
+systemctl --user is-active privacy-filter.service || true
+test -f ~/.config/privacy-filter/config.toml && sed -n '1,80p' ~/.config/privacy-filter/config.toml
+curl -fsS http://127.0.0.1:8765/model-info 2>/dev/null | jq '{device, decode_mode, decode_backend}' || true
+nvidia-smi || true
+```
+
+选择配置时遵循：
+
+- 没有可用 CUDA GPU：使用 CPU-only profile，并保持 `max_file_bytes = 1024`。
+- 共享 GPU / VLLM / hook 尾延迟敏感 host：优先测试 `decode_backend = "jit_gpu"`。
+- 独占或本地 GPU host：先用默认 `decode_backend = "upstream"`，只有 benchmark 显示尾延迟风险时再切 JIT。
+
+`install/install-service.sh` 会按顺序查找模型路径：`PRIVACY_FILTER_MODEL_PATH`、`OPF_CHECKPOINT`、已有 `config.toml` 的 `service.model_path`、`/mnt/LLM/OpenAI/privacy_filter`、`~/.opf/privacy_filter`。新装配置会自动写入解析到的路径；如果模型不在这些位置，先设置环境变量或编辑配置再启动服务。安装脚本默认等待服务健康最多 120 秒，可用 `PRIVACY_FILTER_INSTALL_HEALTH_TIMEOUT_S` 覆盖。
+
+安装或修改配置后，确认功能和性能：
+
+```bash
+curl -fsS http://127.0.0.1:8765/health | jq .
+curl -fsS http://127.0.0.1:8765/model-info | jq '{device, decode_mode, decode_backend}'
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com or call 555-123-4567"}'
+```
+
+GPU host 可跑小 benchmark：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark.py \
+  --skip-cpu --gpu-sizes 10,50,100 \
+  --output /tmp/privacy-filter-benchmark.json
+```
+
+共享 GPU host 再补尾延迟 benchmark：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_tail_latency.py \
+  --sizes 10,50,100 --num-runs 10 \
+  --output /tmp/privacy-filter-tail-latency.json
+```
+
+CPU-only host 不要跑 GPU benchmark；只用小文本 HTTP smoke，并验证超过 `max_file_bytes` 的请求会快速返回 413。
 
 ### 环境变量覆盖
 
@@ -86,6 +142,7 @@ max_inflight_warns_per_5min = 1     # 警告频率限制
 | `PRIVACY_FILTER_DEVICE` | `service.device` | str |
 | `PRIVACY_FILTER_OUTPUT_MODE` | `service.output_mode` | str |
 | `PRIVACY_FILTER_DECODE_MODE` | `service.decode_mode` | str |
+| `PRIVACY_FILTER_DECODE_BACKEND` | `service.decode_backend` | str |
 | `PRIVACY_FILTER_MODEL_PATH` | `service.model_path` | str |
 | `PRIVACY_FILTER_LOG_LEVEL` | `service.log_level` | str |
 | `PRIVACY_FILTER_URL` | `hook.base_url` | str |
@@ -142,6 +199,7 @@ curl -fsS http://127.0.0.1:8765/model-info
   "labels": ["account_number", "private_address", "private_email", "private_person", "private_phone", "private_url", "private_date", "secret"],
   "output_mode": "typed",
   "decode_mode": "viterbi",
+  "decode_backend": "upstream",
   "version": "0.1.0"
 }
 ```
@@ -251,6 +309,7 @@ journalctl --user -u privacy-filter -n 50
 常见原因:
 - **模型目录不存在** — 确认 `/mnt/LLM/OpenAI/privacy_filter` 存在
 - **CUDA 不可用** — 改 `device = "cpu"` 或检查 GPU 驱动
+- **CPU 配置过大** — `device = "cpu"` 时必须设置 `max_file_bytes <= 1024`
 - **配置文件不存在** — 重新运行 `install/install-service.sh`
 
 ### Hook 冲突
@@ -283,6 +342,7 @@ Partial staging not supported in v1. Either fully stage (git add <file>) or unst
 - **仅 CLI 测试** — hooks 仅在 git CLI 测试过，GUI 客户端行为可能不同
 - **单进程** — 服务运行单个 worker，请求串行处理
 - **256KB 文件限制** — 超过 `max_file_bytes`（默认 262144）的文件被跳过
+- **CPU-only 限制** — `device = "cpu"` 时 `max_file_bytes` 最高为 1024 bytes
 
 ---
 

@@ -18,8 +18,12 @@ port = 18765
 device = "cpu"
 output_mode = "typed"
 decode_mode = "viterbi"
+decode_backend = "upstream"
 model_path = "/tmp/fake-checkpoint"
 log_level = "WARNING"
+
+[hook]
+max_file_bytes = 1024
 """
 
 
@@ -33,6 +37,7 @@ def _mock_engine(**overrides) -> MagicMock:
     engine.device = overrides.get("device", "cpu")
     engine.output_mode = overrides.get("output_mode", "typed")
     engine.decode_mode = overrides.get("decode_mode", "viterbi")
+    engine.decode_backend = overrides.get("decode_backend", "upstream")
     return engine
 
 
@@ -99,6 +104,7 @@ class TestModelInfo:
         assert len(data["labels"]) == len(LABELS)
         assert data["output_mode"] == "typed"
         assert data["decode_mode"] == "viterbi"
+        assert data["decode_backend"] == "upstream"
         assert "version" in data
 
     @pytest.mark.asyncio

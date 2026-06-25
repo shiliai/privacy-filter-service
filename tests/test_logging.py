@@ -9,7 +9,6 @@ import pytest
 from privacy_filter_service.logging_setup import (
     RedactFilter,
     configure_logging,
-    request_id_middleware,
 )
 
 

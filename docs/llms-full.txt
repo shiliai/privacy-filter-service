@@ -96,6 +96,7 @@ Runtime model metadata. Does NOT expose `model_path` (security: avoids leaking f
   ],
   "output_mode": "typed",
   "decode_mode": "viterbi",
+  "decode_backend": "upstream",
   "version": "0.1.0"
 }
 ```
@@ -326,6 +327,7 @@ class ModelInfoResponse(BaseModel):
     labels: list[str]    # All 8 PII label names
     output_mode: str     # "typed" or "redacted"
     decode_mode: str     # "viterbi" or "argmax"
+    decode_backend: str  # "upstream" or "jit_gpu"
     version: str         # "0.1.0"
     # NOTE: model_path and checkpoint are intentionally excluded (security)
 ```
@@ -365,6 +367,7 @@ port = 8765                 # Listen port (1-65535)
 device = "cuda"             # "cuda" or "cpu"
 output_mode = "typed"       # "typed" (with labels) or "redacted" (collapsed)
 decode_mode = "viterbi"     # "viterbi" or "argmax"
+decode_backend = "upstream" # "upstream" or "jit_gpu"
 model_path = ""             # REQUIRED — path to OPF checkpoint dir
 log_level = "INFO"          # Python logging level
 
@@ -386,6 +389,7 @@ All config keys can be overridden by env vars (loaded after TOML):
 | `PRIVACY_FILTER_DEVICE` | `service.device` | str |
 | `PRIVACY_FILTER_OUTPUT_MODE` | `service.output_mode` | str |
 | `PRIVACY_FILTER_DECODE_MODE` | `service.decode_mode` | str |
+| `PRIVACY_FILTER_DECODE_BACKEND` | `service.decode_backend` | str |
 | `PRIVACY_FILTER_MODEL_PATH` | `service.model_path` | str |
 | `PRIVACY_FILTER_LOG_LEVEL` | `service.log_level` | str |
 | `PRIVACY_FILTER_URL` | `hook.base_url` | str |
@@ -396,13 +400,140 @@ All config keys can be overridden by env vars (loaded after TOML):
 
 Resolution order: TOML → `PRIVACY_FILTER_*` env → `OPF_CHECKPOINT` fallback.
 
+### Recommended deployment profiles
+
+| Scenario | `device` | `decode_backend` | `max_file_bytes` | Notes |
+|----------|----------|------------------|------------------|-------|
+| Current/local GPU host | `cuda` | `upstream` | `262144` | GPU forward + upstream CPU Viterbi; fastest on the local RTX 3090 host. |
+| Multi-tenant GPU host | `cuda` | `jit_gpu` | `262144` | GPU forward + GPU JIT Viterbi; avoids A6000/VLLM CPU-decode tail latency. |
+| CPU-only host | `cpu` | `upstream` | `1024` | Full CPU inference; service config validation rejects larger single-text limits. |
+
+### Agent deployment workflow
+
+Agents must confirm the target environment before installing or changing the
+service. Do not blindly copy the default config onto an existing host.
+
+1. Inspect any existing deployment and config:
+
+```bash
+systemctl --user is-active privacy-filter.service || true
+systemctl --user cat privacy-filter.service 2>/dev/null || true
+test -f ~/.config/privacy-filter/config.toml && sed -n '1,80p' ~/.config/privacy-filter/config.toml
+curl -fsS http://127.0.0.1:8765/model-info 2>/dev/null | jq '{device, decode_mode, decode_backend}' || true
+```
+
+2. Inspect hardware and GPU tenancy:
+
+```bash
+command -v nvidia-smi >/dev/null && nvidia-smi \
+  --query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu \
+  --format=csv || echo "nvidia-smi unavailable"
+command -v nvidia-smi >/dev/null && nvidia-smi \
+  --query-compute-apps=pid,process_name,used_memory \
+  --format=csv,noheader,nounits || true
+```
+
+3. Choose the config profile:
+
+- If there is no usable CUDA GPU, use the CPU-only profile:
+  `device="cpu"`, `decode_backend="upstream"`, `max_file_bytes=1024`.
+- If CUDA is available and the host is a shared GPU / VLLM / tail-latency
+  sensitive host, prefer `decode_backend="jit_gpu"`.
+- Otherwise start with `decode_backend="upstream"` and only switch to
+  `jit_gpu` if local benchmark tail latency approaches or exceeds the hook
+  timeout.
+
+The service installer resolves the model path in this order:
+`PRIVACY_FILTER_MODEL_PATH`, `OPF_CHECKPOINT`, existing
+`~/.config/privacy-filter/config.toml` `service.model_path`,
+`/mnt/LLM/OpenAI/privacy_filter`, then `~/.opf/privacy_filter`. If the target
+host stores the checkpoint elsewhere, set one of the env vars or update the
+config before starting the service. On a new install, the resolved path is
+written into `config.toml`. The installer waits up to 120 seconds for warmup by
+default; override with `PRIVACY_FILTER_INSTALL_HEALTH_TIMEOUT_S` if needed.
+
+4. Install or update config:
+
+```bash
+cd ~/project/docker/privacy-filter-service
+bash install/install-service.sh
+$EDITOR ~/.config/privacy-filter/config.toml
+systemctl --user restart privacy-filter.service
+```
+
+For an existing deployment, preserve user config unless the requested change
+requires editing it. After any config change, restart and re-check `model-info`.
+
+5. Verify function and selected backend:
+
+```bash
+curl -fsS http://127.0.0.1:8765/health | jq .
+curl -fsS http://127.0.0.1:8765/model-info | jq '{device, decode_mode, decode_backend}'
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com or call 555-123-4567"}'
+```
+
+The `/model-info` response must match the chosen profile. The redaction smoke
+test must redact the email/phone sample and must not require raw text in logs.
+
+6. Run a small post-install benchmark.
+
+GPU hosts:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark.py \
+  --skip-cpu \
+  --gpu-sizes 10,50,100 \
+  --output /tmp/privacy-filter-benchmark.json
+```
+
+Shared GPU / VLLM hosts should also check tail latency:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_tail_latency.py \
+  --sizes 10,50,100 \
+  --num-runs 10 \
+  --output /tmp/privacy-filter-tail-latency.json
+```
+
+CPU-only hosts must not run the GPU benchmark scripts. Use a small HTTP timing
+smoke and verify oversized inputs are rejected quickly:
+
+```bash
+python3 - <<'PY' | curl -fsS -o /tmp/privacy-filter-cpu-smoke.txt \
+  -w 'http=%{http_code} time_total=%{time_total}\n' \
+  -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' --data-binary @-
+import json
+print(json.dumps({"text": "Email alice@example.com. " * 20}))
+PY
+
+python3 - <<'PY' | curl -sS -o /tmp/privacy-filter-oversize.json \
+  -w 'http=%{http_code} time_total=%{time_total}\n' \
+  -X POST http://127.0.0.1:8765/redact \
+  -H 'Content-Type: application/json' --data-binary @-
+import json
+print(json.dumps({"text": "x" * 2048}))
+PY
+```
+
+For GPU deployments, compare `cuda_cpu_viterbi` and `cuda_jit`. Use
+`jit_gpu` when it materially reduces p95/p99/max latency or avoids requests
+exceeding the hook timeout. Use `upstream` when it is faster and tail latency
+stays comfortably below the timeout. For CPU-only deployments, keep benchmark
+texts below `max_file_bytes`; large CPU runs can take a long time.
+
 ### Validation rules
 
 - `port`: 1–65535
 - `device`: `cuda` or `cpu`
 - `output_mode`: `typed` or `redacted`
 - `decode_mode`: `viterbi` or `argmax`
+- `decode_backend`: `upstream` or `jit_gpu`
+- `decode_backend=jit_gpu` requires `device=cuda`
 - `max_file_bytes`: <= 1048576 (1 MB)
+- `device=cpu` requires `max_file_bytes <= 1024`
 - `request_timeout_s`: 1–60
 - `model_path`: **required** (no silent fallback)
 - Crashes with `SystemExit` on invalid config (fail-fast)
@@ -796,6 +927,7 @@ def _register_routes(app: FastAPI) -> None:
             labels=list(LABELS),
             output_mode=engine.output_mode,
             decode_mode=engine.decode_mode,
+            decode_backend=engine.decode_backend,
             version="0.1.0",
         )
 
@@ -934,7 +1066,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 OPF_CHECKPOINT_ENV = "OPF_CHECKPOINT"
 PRIVACY_FILTER_CONFIG_ENV = "PRIVACY_FILTER_CONFIG"
@@ -945,6 +1077,7 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PRIVACY_FILTER_DEVICE": "service.device",
     "PRIVACY_FILTER_OUTPUT_MODE": "service.output_mode",
     "PRIVACY_FILTER_DECODE_MODE": "service.decode_mode",
+    "PRIVACY_FILTER_DECODE_BACKEND": "service.decode_backend",
     "PRIVACY_FILTER_MODEL_PATH": "service.model_path",
     "PRIVACY_FILTER_LOG_LEVEL": "service.log_level",
     "PRIVACY_FILTER_URL": "hook.base_url",
@@ -992,6 +1125,7 @@ class ServiceConfig(BaseModel):
     device: Literal["cuda", "cpu"] = "cuda"
     output_mode: Literal["typed", "redacted"] = "typed"
     decode_mode: Literal["viterbi", "argmax"] = "viterbi"
+    decode_backend: Literal["upstream", "jit_gpu"] = "upstream"
     model_path: str
     log_level: str = "INFO"
 
@@ -1010,6 +1144,16 @@ class Settings(BaseModel):
 
     service: ServiceConfig
     hook: HookConfig = Field(default_factory=HookConfig)
+
+    @model_validator(mode="after")
+    def validate_backend_constraints(self) -> Settings:
+        if self.service.decode_backend == "jit_gpu" and self.service.device != "cuda":
+            raise ValueError('decode_backend="jit_gpu" requires service.device="cuda"')
+        if self.service.device == "cpu" and self.hook.max_file_bytes > 1024:
+            raise ValueError(
+                'service.device="cpu" requires hook.max_file_bytes <= 1024'
+            )
+        return self
 
 
 def load_settings(
@@ -1072,6 +1216,7 @@ from fastapi import Depends
 from opf._api import OPF, RedactionResult as OPFRedactionResult
 
 from privacy_filter_service.config import ServiceConfig, Settings, load_settings
+from privacy_filter_service.fast_predict import redact_with_gpu_decode
 from privacy_filter_service.models import RedactionResult
 
 
@@ -1082,6 +1227,9 @@ class OPFEngine:
         self.device: Literal["cuda", "cpu"] = service_settings.device
         self.output_mode: Literal["typed", "redacted"] = service_settings.output_mode
         self.decode_mode: Literal["viterbi", "argmax"] = service_settings.decode_mode
+        self.decode_backend: Literal["upstream", "jit_gpu"] = (
+            service_settings.decode_backend
+        )
         self.model_path: str = service_settings.model_path
         self.ready: bool = False
         self._opf: OPF | None = None
@@ -1103,7 +1251,7 @@ class OPFEngine:
                 output_mode=self.output_mode,
                 decode_mode=self.decode_mode,
             )
-            smoke: str | OPFRedactionResult = opf.redact("test")
+            smoke: str | OPFRedactionResult = self._redact_with_backend(opf, "test")
             if isinstance(smoke, str):
                 raise TypeError("OPF.redact() returned text-only output during warmup")
             self._opf = opf
@@ -1113,7 +1261,7 @@ class OPFEngine:
         await self.warmup()
         async with self._lock:
             opf = self._require_opf()
-            result: str | OPFRedactionResult = opf.redact(text)
+            result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
             if isinstance(result, str):
                 raise TypeError("OPF.redact() returned text-only output")
             return RedactionResult.model_validate(result.to_dict())
@@ -1124,11 +1272,16 @@ class OPFEngine:
             opf = self._require_opf()
             results: list[RedactionResult] = []
             for text in texts:
-                result: str | OPFRedactionResult = opf.redact(text)
+                result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
                 if isinstance(result, str):
                     raise TypeError("OPF.redact() returned text-only output")
                 results.append(RedactionResult.model_validate(result.to_dict()))
             return results
+
+    def _redact_with_backend(self, opf: OPF, text: str) -> str | OPFRedactionResult:
+        if self.decode_backend == "upstream":
+            return opf.redact(text)
+        return redact_with_gpu_decode(opf, text)
 
     def _require_opf(self) -> OPF:
         if self._opf is None:
@@ -1241,6 +1394,7 @@ class ModelInfoResponse(BaseModel):
     labels: list[str]
     output_mode: str
     decode_mode: str
+    decode_backend: str
     version: str
 ```
 

@@ -18,8 +18,12 @@ port = 18765
 device = "cpu"
 output_mode = "typed"
 decode_mode = "viterbi"
+decode_backend = "upstream"
 model_path = "/tmp/fake-checkpoint"
 log_level = "WARNING"
+
+[hook]
+max_file_bytes = 1024
 """
 
 
@@ -54,6 +58,7 @@ def _mock_engine(result: RedactionResult | None = None) -> MagicMock:
     engine.device = "cpu"
     engine.output_mode = "typed"
     engine.decode_mode = "viterbi"
+    engine.decode_backend = "upstream"
     if result is None:
         result = _make_redaction_result("test", "<PRIVATE_EMAIL> test", 1)
     engine.redact = AsyncMock(return_value=result)
@@ -119,7 +124,7 @@ class TestRedact:
     @pytest.mark.asyncio
     async def test_redact_413_oversized(self, client):
         ac, engine = client
-        big_text = "x" * 300_000
+        big_text = "x" * 2_000
         resp = await ac.post("/redact", json={"text": big_text})
         assert resp.status_code == 413
         engine.redact.assert_not_awaited()
@@ -127,7 +132,7 @@ class TestRedact:
     @pytest.mark.asyncio
     async def test_redact_no_raw_text_in_error(self, client):
         ac, engine = client
-        big_text = "secret@example.com" + "x" * 300_000
+        big_text = "secret@example.com" + "x" * 2_000
         resp = await ac.post("/redact", json={"text": big_text})
         assert resp.status_code == 413
         assert "secret@example.com" not in resp.text
@@ -153,7 +158,7 @@ class TestRedactText:
     @pytest.mark.asyncio
     async def test_redact_text_413_oversized(self, client):
         ac, engine = client
-        big_text = "x" * 300_000
+        big_text = "x" * 2_000
         resp = await ac.post("/redact/text", json={"text": big_text})
         assert resp.status_code == 413
         engine.redact.assert_not_awaited()

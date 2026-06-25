@@ -12,7 +12,7 @@ try:
 except ModuleNotFoundError:
     import tomli as tomllib  # type: ignore[no-redef]
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 OPF_CHECKPOINT_ENV = "OPF_CHECKPOINT"
 PRIVACY_FILTER_CONFIG_ENV = "PRIVACY_FILTER_CONFIG"
@@ -23,6 +23,7 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PRIVACY_FILTER_DEVICE": "service.device",
     "PRIVACY_FILTER_OUTPUT_MODE": "service.output_mode",
     "PRIVACY_FILTER_DECODE_MODE": "service.decode_mode",
+    "PRIVACY_FILTER_DECODE_BACKEND": "service.decode_backend",
     "PRIVACY_FILTER_MODEL_PATH": "service.model_path",
     "PRIVACY_FILTER_LOG_LEVEL": "service.log_level",
     "PRIVACY_FILTER_URL": "hook.base_url",
@@ -70,6 +71,7 @@ class ServiceConfig(BaseModel):
     device: Literal["cuda", "cpu"] = "cuda"
     output_mode: Literal["typed", "redacted"] = "typed"
     decode_mode: Literal["viterbi", "argmax"] = "viterbi"
+    decode_backend: Literal["upstream", "jit_gpu"] = "upstream"
     model_path: str
     log_level: str = "INFO"
 
@@ -88,6 +90,16 @@ class Settings(BaseModel):
 
     service: ServiceConfig
     hook: HookConfig = Field(default_factory=HookConfig)
+
+    @model_validator(mode="after")
+    def validate_backend_constraints(self) -> Settings:
+        if self.service.decode_backend == "jit_gpu" and self.service.device != "cuda":
+            raise ValueError('decode_backend="jit_gpu" requires service.device="cuda"')
+        if self.service.device == "cpu" and self.hook.max_file_bytes > 1024:
+            raise ValueError(
+                'service.device="cpu" requires hook.max_file_bytes <= 1024'
+            )
+        return self
 
 
 def load_settings(

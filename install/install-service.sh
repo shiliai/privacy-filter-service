@@ -20,16 +20,116 @@ ok()    { printf '[\033[1;32m OK \033[0m]  %s\n' "$*"; }
 die() { error "$@"; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Target directories
+# ---------------------------------------------------------------------------
+CONFIG_DIR="$HOME/.config/privacy-filter"
+SYSTEMD_DIR="$HOME/.config/systemd/user"
+MODEL_PATH=""
+
+resolve_model_path() {
+  local config_file="$CONFIG_DIR/config.toml"
+  local candidates=()
+
+  if [ -n "${PRIVACY_FILTER_MODEL_PATH:-}" ]; then
+    candidates+=("$PRIVACY_FILTER_MODEL_PATH")
+  fi
+  if [ -n "${OPF_CHECKPOINT:-}" ]; then
+    candidates+=("$OPF_CHECKPOINT")
+  fi
+  if [ -f "$config_file" ]; then
+    local config_model_path
+    config_model_path="$(
+      python3 - "$config_file" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        print("")
+        raise SystemExit(0)
+
+with open(sys.argv[1], "rb") as fh:
+    data = tomllib.load(fh)
+print(data.get("service", {}).get("model_path", ""))
+PY
+    )"
+    if [ -n "$config_model_path" ]; then
+      candidates+=("$config_model_path")
+    fi
+  fi
+  candidates+=(
+    "/mnt/LLM/OpenAI/privacy_filter"
+    "$HOME/.opf/privacy_filter"
+  )
+
+  local path
+  for path in "${candidates[@]}"; do
+    [ -n "$path" ] || continue
+    if [ -d "$path" ]; then
+      printf '%s' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+config_model_path() {
+  local config_file="$1"
+  [ -f "$config_file" ] || return 0
+  python3 - "$config_file" <<'PY'
+import sys
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        print("")
+        raise SystemExit(0)
+
+with open(sys.argv[1], "rb") as fh:
+    data = tomllib.load(fh)
+print(data.get("service", {}).get("model_path", ""))
+PY
+}
+
+write_model_path_if_empty() {
+  local config_file="$1"
+  [ -n "$MODEL_PATH" ] || return 0
+  python3 - "$config_file" "$MODEL_PATH" <<'PY'
+from pathlib import Path
+import sys
+
+config_file = Path(sys.argv[1])
+model_path = sys.argv[2].replace("\\", "\\\\").replace('"', '\\"')
+lines = config_file.read_text(encoding="utf-8").splitlines()
+updated = []
+changed = False
+for line in lines:
+    stripped = line.strip()
+    if not changed and stripped.startswith("model_path"):
+        before_comment, sep, comment = line.partition("#")
+        if '""' in before_comment:
+            indent = line[: len(line) - len(line.lstrip())]
+            suffix = f"  #{comment}" if sep else ""
+            line = f'{indent}model_path = "{model_path}"{suffix}'
+            changed = True
+    updated.append(line)
+config_file.write_text("\n".join(updated) + "\n", encoding="utf-8")
+PY
+}
+
+# ---------------------------------------------------------------------------
 # 1. Validate prerequisites
 # ---------------------------------------------------------------------------
 check_prereqs() {
   command -v uv >/dev/null 2>&1   || die "uv is not installed. Install from https://docs.astral.sh/uv/"
   systemctl --version >/dev/null 2>&1 || die "systemctl --user is not available (no user session?)"
 
-  local model_path="/mnt/LLM/OpenAI/privacy_filter"
-  if [ ! -d "$model_path" ]; then
-    die "Model directory not found: $model_path"
-  fi
+  MODEL_PATH="$(resolve_model_path)" || die "Model directory not found. Set service.model_path in $CONFIG_DIR/config.toml, PRIVACY_FILTER_MODEL_PATH, or OPF_CHECKPOINT."
+  info "Using model path: $MODEL_PATH"
 
   local venv_bin="$PROJECT_ROOT/.venv/bin/privacy-filter-service"
   if [ ! -x "$venv_bin" ]; then
@@ -40,9 +140,6 @@ check_prereqs() {
 # ---------------------------------------------------------------------------
 # 2. Create target directories
 # ---------------------------------------------------------------------------
-CONFIG_DIR="$HOME/.config/privacy-filter"
-SYSTEMD_DIR="$HOME/.config/systemd/user"
-
 create_dirs() {
   mkdir -p "$CONFIG_DIR" "$SYSTEMD_DIR"
 }
@@ -56,9 +153,10 @@ deploy_config() {
 
   if [ ! -f "$dst" ]; then
     cp "$src" "$dst"
+    write_model_path_if_empty "$dst"
     chmod 600 "$dst"
     ok "config.toml installed → $dst"
-    info "Edit $dst to set model_path and other options."
+    info "Edit $dst to review device, decode_backend, and hook limits."
   else
     printf '[\033[1;33m???\033[0m]  config.toml already exists at %s\n' "$dst" >&2
     printf '       Overwrite? [y/N] ' >&2
@@ -66,10 +164,14 @@ deploy_config() {
     read -r ans
     if echo "$ans" | grep -qi '^y'; then
       cp "$src" "$dst"
+      write_model_path_if_empty "$dst"
       chmod 600 "$dst"
       ok "config.toml overwritten → $dst"
     else
       info "Keeping existing config.toml"
+      if [ -z "$(config_model_path "$dst")" ]; then
+        warn "Existing config.toml has empty service.model_path; set it before restarting the service."
+      fi
     fi
   fi
 }
@@ -129,15 +231,16 @@ enable_service() {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Health check — wait up to 30s for /health → ready=true
+# 7. Health check — wait for /health → ready=true
 # ---------------------------------------------------------------------------
 health_check() {
   local base_url="http://127.0.0.1:8765"
   local elapsed=0
   local interval=2
+  local timeout="${PRIVACY_FILTER_INSTALL_HEALTH_TIMEOUT_S:-120}"
 
-  info "Waiting for service to become healthy (timeout 30s)…"
-  while [ "$elapsed" -lt 30 ]; do
+  info "Waiting for service to become healthy (timeout ${timeout}s)…"
+  while [ "$elapsed" -lt "$timeout" ]; do
     local response
     response="$(curl -fsS -m "$interval" "$base_url/health" 2>/dev/null)" || true
 

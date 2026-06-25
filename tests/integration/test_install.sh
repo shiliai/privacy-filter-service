@@ -54,6 +54,17 @@ assert_file_not_exists() {
   fi
 }
 
+assert_executable_exists() {
+  local desc="$1" path="$2"
+  if [ -x "$path" ]; then
+    printf '  PASS: %s\n' "$desc"
+    pass=$((pass + 1))
+  else
+    printf '  FAIL: %s\n    executable not found: %s\n' "$desc" "$path" >&2
+    fail=$((fail + 1))
+  fi
+}
+
 make_test_home() {
   local home="$1"
   mkdir -p "$home/.config/systemd/user"
@@ -64,6 +75,77 @@ make_test_home() {
 cleanup_test_home() {
   local home="$1"
   rm -rf "$home"
+}
+
+# ============================================================================
+# Test 0: install-service.sh accepts model path from env/config
+# ============================================================================
+test_service_install_model_path_from_env() {
+  printf '\n--- test_service_install_model_path_from_env ---\n'
+  local home bin_dir model_dir output created_venv_bin=0
+  home="$(mktemp -d)"
+  trap 'cleanup_test_home "$home"' RETURN
+
+  make_test_home "$home"
+  bin_dir="$home/bin"
+  model_dir="$home/model"
+  mkdir -p "$bin_dir" "$model_dir"
+  if [ ! -x "$ROOT_DIR/.venv/bin/privacy-filter-service" ]; then
+    mkdir -p "$ROOT_DIR/.venv/bin"
+    touch "$ROOT_DIR/.venv/bin/privacy-filter-service"
+    chmod +x "$ROOT_DIR/.venv/bin/privacy-filter-service"
+    created_venv_bin=1
+  fi
+
+  cat > "$bin_dir/uv" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$bin_dir/uv"
+
+  cat > "$bin_dir/systemctl" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"--version"*) echo "systemd 255"; exit 0 ;;
+  *"daemon-reload"*) exit 0 ;;
+  *"enable --now privacy-filter.service"*) exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+  chmod +x "$bin_dir/systemctl"
+
+  cat > "$bin_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '{"ready":true}\n'
+EOF
+  chmod +x "$bin_dir/curl"
+
+  cat > "$bin_dir/loginctl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$bin_dir/loginctl"
+
+  output="$(
+    PATH="$bin_dir:$PATH" \
+    HOME="$home" \
+    PRIVACY_FILTER_MODEL_PATH="$model_dir" \
+    bash "$INSTALL_DIR/install-service.sh" <<<'n'
+  )" || true
+
+  assert_contains "installer uses env model path" "$output" "Using model path: $model_dir"
+  assert_file_exists "service config installed" "$home/.config/privacy-filter/config.toml"
+  assert_contains "config gets resolved model path" "$(cat "$home/.config/privacy-filter/config.toml")" "model_path = \"$model_dir\""
+  assert_file_exists "env installed" "$home/.config/privacy-filter/env"
+  assert_file_exists "unit installed" "$home/.config/systemd/user/privacy-filter.service"
+  assert_executable_exists "venv binary restored" "$ROOT_DIR/.venv/bin/privacy-filter-service"
+
+  if [ "$created_venv_bin" -eq 1 ]; then
+    rm -f "$ROOT_DIR/.venv/bin/privacy-filter-service"
+    rmdir "$ROOT_DIR/.venv/bin" "$ROOT_DIR/.venv" 2>/dev/null || true
+  fi
+  cleanup_test_home "$home"
+  trap - RETURN
 }
 
 # ============================================================================
@@ -204,6 +286,7 @@ test_uninstall() {
 # ============================================================================
 # Run all tests
 # ============================================================================
+test_service_install_model_path_from_env
 test_clean_install
 test_collision_abort
 test_force_override
