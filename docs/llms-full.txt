@@ -408,6 +408,122 @@ Resolution order: TOML → `PRIVACY_FILTER_*` env → `OPF_CHECKPOINT` fallback.
 | Multi-tenant GPU host | `cuda` | `jit_gpu` | `262144` | GPU forward + GPU JIT Viterbi; avoids A6000/VLLM CPU-decode tail latency. |
 | CPU-only host | `cpu` | `upstream` | `1024` | Full CPU inference; service config validation rejects larger single-text limits. |
 
+### Agent deployment workflow
+
+Agents must confirm the target environment before installing or changing the
+service. Do not blindly copy the default config onto an existing host.
+
+1. Inspect any existing deployment and config:
+
+```bash
+systemctl --user is-active privacy-filter.service || true
+systemctl --user cat privacy-filter.service 2>/dev/null || true
+test -f ~/.config/privacy-filter/config.toml && sed -n '1,80p' ~/.config/privacy-filter/config.toml
+curl -fsS http://127.0.0.1:8765/model-info 2>/dev/null | jq '{device, decode_mode, decode_backend}' || true
+```
+
+2. Inspect hardware and GPU tenancy:
+
+```bash
+command -v nvidia-smi >/dev/null && nvidia-smi \
+  --query-gpu=name,driver_version,memory.total,memory.used,utilization.gpu \
+  --format=csv || echo "nvidia-smi unavailable"
+command -v nvidia-smi >/dev/null && nvidia-smi \
+  --query-compute-apps=pid,process_name,used_memory \
+  --format=csv,noheader,nounits || true
+```
+
+3. Choose the config profile:
+
+- If there is no usable CUDA GPU, use the CPU-only profile:
+  `device="cpu"`, `decode_backend="upstream"`, `max_file_bytes=1024`.
+- If CUDA is available and the host is a shared GPU / VLLM / tail-latency
+  sensitive host, prefer `decode_backend="jit_gpu"`.
+- Otherwise start with `decode_backend="upstream"` and only switch to
+  `jit_gpu` if local benchmark tail latency approaches or exceeds the hook
+  timeout.
+
+The service installer resolves the model path in this order:
+`PRIVACY_FILTER_MODEL_PATH`, `OPF_CHECKPOINT`, existing
+`~/.config/privacy-filter/config.toml` `service.model_path`,
+`/mnt/LLM/OpenAI/privacy_filter`, then `~/.opf/privacy_filter`. If the target
+host stores the checkpoint elsewhere, set one of the env vars or update the
+config before starting the service. On a new install, the resolved path is
+written into `config.toml`. The installer waits up to 120 seconds for warmup by
+default; override with `PRIVACY_FILTER_INSTALL_HEALTH_TIMEOUT_S` if needed.
+
+4. Install or update config:
+
+```bash
+cd ~/project/docker/privacy-filter-service
+bash install/install-service.sh
+$EDITOR ~/.config/privacy-filter/config.toml
+systemctl --user restart privacy-filter.service
+```
+
+For an existing deployment, preserve user config unless the requested change
+requires editing it. After any config change, restart and re-check `model-info`.
+
+5. Verify function and selected backend:
+
+```bash
+curl -fsS http://127.0.0.1:8765/health | jq .
+curl -fsS http://127.0.0.1:8765/model-info | jq '{device, decode_mode, decode_backend}'
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com or call 555-123-4567"}'
+```
+
+The `/model-info` response must match the chosen profile. The redaction smoke
+test must redact the email/phone sample and must not require raw text in logs.
+
+6. Run a small post-install benchmark.
+
+GPU hosts:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark.py \
+  --skip-cpu \
+  --gpu-sizes 10,50,100 \
+  --output /tmp/privacy-filter-benchmark.json
+```
+
+Shared GPU / VLLM hosts should also check tail latency:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_tail_latency.py \
+  --sizes 10,50,100 \
+  --num-runs 10 \
+  --output /tmp/privacy-filter-tail-latency.json
+```
+
+CPU-only hosts must not run the GPU benchmark scripts. Use a small HTTP timing
+smoke and verify oversized inputs are rejected quickly:
+
+```bash
+python3 - <<'PY' | curl -fsS -o /tmp/privacy-filter-cpu-smoke.txt \
+  -w 'http=%{http_code} time_total=%{time_total}\n' \
+  -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' --data-binary @-
+import json
+print(json.dumps({"text": "Email alice@example.com. " * 20}))
+PY
+
+python3 - <<'PY' | curl -sS -o /tmp/privacy-filter-oversize.json \
+  -w 'http=%{http_code} time_total=%{time_total}\n' \
+  -X POST http://127.0.0.1:8765/redact \
+  -H 'Content-Type: application/json' --data-binary @-
+import json
+print(json.dumps({"text": "x" * 2048}))
+PY
+```
+
+For GPU deployments, compare `cuda_cpu_viterbi` and `cuda_jit`. Use
+`jit_gpu` when it materially reduces p95/p99/max latency or avoids requests
+exceeding the hook timeout. Use `upstream` when it is faster and tail latency
+stays comfortably below the timeout. For CPU-only deployments, keep benchmark
+texts below `max_file_bytes`; large CPU runs can take a long time.
+
 ### Validation rules
 
 - `port`: 1–65535

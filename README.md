@@ -84,6 +84,53 @@ max_inflight_warns_per_5min = 1     # 警告频率限制
 | 多租户 GPU host | `cuda` | `jit_gpu` | `262144` | GPU forward + GPU JIT Viterbi，用于避免 A6000/VLLM 上的 CPU decode 尾延迟 |
 | CPU-only host | `cpu` | `upstream` | `1024` | 全 CPU 推理很慢，服务启动时强制 `max_file_bytes <= 1024` |
 
+### 部署前检查
+
+部署或改配置前先确认当前环境，不要直接覆盖已有配置：
+
+```bash
+systemctl --user is-active privacy-filter.service || true
+test -f ~/.config/privacy-filter/config.toml && sed -n '1,80p' ~/.config/privacy-filter/config.toml
+curl -fsS http://127.0.0.1:8765/model-info 2>/dev/null | jq '{device, decode_mode, decode_backend}' || true
+nvidia-smi || true
+```
+
+选择配置时遵循：
+
+- 没有可用 CUDA GPU：使用 CPU-only profile，并保持 `max_file_bytes = 1024`。
+- 共享 GPU / VLLM / hook 尾延迟敏感 host：优先测试 `decode_backend = "jit_gpu"`。
+- 独占或本地 GPU host：先用默认 `decode_backend = "upstream"`，只有 benchmark 显示尾延迟风险时再切 JIT。
+
+`install/install-service.sh` 会按顺序查找模型路径：`PRIVACY_FILTER_MODEL_PATH`、`OPF_CHECKPOINT`、已有 `config.toml` 的 `service.model_path`、`/mnt/LLM/OpenAI/privacy_filter`、`~/.opf/privacy_filter`。新装配置会自动写入解析到的路径；如果模型不在这些位置，先设置环境变量或编辑配置再启动服务。安装脚本默认等待服务健康最多 120 秒，可用 `PRIVACY_FILTER_INSTALL_HEALTH_TIMEOUT_S` 覆盖。
+
+安装或修改配置后，确认功能和性能：
+
+```bash
+curl -fsS http://127.0.0.1:8765/health | jq .
+curl -fsS http://127.0.0.1:8765/model-info | jq '{device, decode_mode, decode_backend}'
+curl -fsS -X POST http://127.0.0.1:8765/redact/text \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"Email alice@example.com or call 555-123-4567"}'
+```
+
+GPU host 可跑小 benchmark：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark.py \
+  --skip-cpu --gpu-sizes 10,50,100 \
+  --output /tmp/privacy-filter-benchmark.json
+```
+
+共享 GPU host 再补尾延迟 benchmark：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_tail_latency.py \
+  --sizes 10,50,100 --num-runs 10 \
+  --output /tmp/privacy-filter-tail-latency.json
+```
+
+CPU-only host 不要跑 GPU benchmark；只用小文本 HTTP smoke，并验证超过 `max_file_bytes` 的请求会快速返回 413。
+
 ### 环境变量覆盖
 
 任何配置项都可通过环境变量覆盖。复制 `config/env.example` 到 `~/.config/privacy-filter/env`，取消注释需要的行。systemd unit 自动加载此文件。
