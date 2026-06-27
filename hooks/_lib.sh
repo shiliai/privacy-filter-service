@@ -21,30 +21,17 @@ _pf_url_ready() {
   printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") is True else 1)'
 }
 
-_pf_service_ready() {
-  _pf_url_ready "$(pf_url)"
-}
-
-_pf_fallback_ready() {
-  _pf_url_ready "$(pf_fallback_url)"
-}
-
+# Probe primary OPF then local fallback; print "opf" or "fallback" and return 0
+# on the first healthy backend, return 1 if neither is reachable (fail-open).
 pf_active_backend() {
-  local response
-  if response="$(curl -fsS -m 2 "$(pf_url)/health" 2>/dev/null)" &&
-    printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") is True else 1)'
-  then
+  if _pf_url_ready "$(pf_url)"; then
     printf '%s' "opf"
     return 0
   fi
-
-  if response="$(curl -fsS -m 2 "$(pf_fallback_url)/health" 2>/dev/null)" &&
-    printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") is True else 1)'
-  then
+  if _pf_url_ready "$(pf_fallback_url)"; then
     printf '%s' "fallback"
     return 0
   fi
-
   return 1
 }
 
