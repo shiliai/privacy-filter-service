@@ -10,13 +10,20 @@ MOCK_SERVICE="$SCRIPT_DIR/mock_service.py"
 PF_IT_ROOT="${PF_IT_ROOT:-}"
 PF_IT_OWNS_ROOT=0
 PF_IT_SERVER_PID=""
+PF_IT_FALLBACK_SERVER_PID=""
 PF_IT_SERVICE_LOG=""
+PF_IT_FALLBACK_SERVICE_LOG=""
 PF_IT_PORT=""
+PF_IT_FALLBACK_PORT=""
 
 pfit_cleanup() {
   if [ -n "$PF_IT_SERVER_PID" ] && kill -0 "$PF_IT_SERVER_PID" 2>/dev/null; then
     kill "$PF_IT_SERVER_PID" 2>/dev/null || true
     wait "$PF_IT_SERVER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$PF_IT_FALLBACK_SERVER_PID" ] && kill -0 "$PF_IT_FALLBACK_SERVER_PID" 2>/dev/null; then
+    kill "$PF_IT_FALLBACK_SERVER_PID" 2>/dev/null || true
+    wait "$PF_IT_FALLBACK_SERVER_PID" 2>/dev/null || true
   fi
   if [ "$PF_IT_OWNS_ROOT" -eq 1 ] && [ -n "$PF_IT_ROOT" ] && [ -d "$PF_IT_ROOT" ]; then
     rm -rf "$PF_IT_ROOT"
@@ -74,6 +81,27 @@ pfit_start_service() {
   return 1
 }
 
+pfit_start_fallback_service() {
+  local mode
+  mode="$1"
+  PF_IT_FALLBACK_PORT="$(pfit_pick_port)"
+  PF_IT_FALLBACK_SERVICE_LOG="$PF_IT_ROOT/fallback-service.log"
+  python3 "$MOCK_SERVICE" --port "$PF_IT_FALLBACK_PORT" --mode "$mode" --log-file "$PF_IT_FALLBACK_SERVICE_LOG" &
+  PF_IT_FALLBACK_SERVER_PID=$!
+  export PRIVACY_FILTER_FALLBACK_URL="http://127.0.0.1:$PF_IT_FALLBACK_PORT"
+
+  for _ in $(seq 1 50); do
+    if curl -fsS -m 1 "$PRIVACY_FILTER_FALLBACK_URL/health" >/dev/null 2>&1; then
+      : > "$PF_IT_FALLBACK_SERVICE_LOG"
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo "fallback service failed to start" >&2
+  return 1
+}
+
 pfit_make_repo() {
   local name repo
   name="$1"
@@ -113,4 +141,10 @@ pfit_log_contains() {
   local needle
   needle="$1"
   grep -q -- "$needle" "$PF_IT_SERVICE_LOG"
+}
+
+pfit_fallback_log_contains() {
+  local needle
+  needle="$1"
+  grep -q -- "$needle" "$PF_IT_FALLBACK_SERVICE_LOG"
 }

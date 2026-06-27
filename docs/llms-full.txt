@@ -38,7 +38,7 @@
 
 ## API Endpoints
 
-Base URL: `http://127.0.0.1:8765` (configurable)
+Base URL: primary OPF defaults to `http://192.168.88.75:8765`; local service examples use `http://127.0.0.1:8765`.
 
 All endpoints return `X-Request-ID` header (UUID4 generated if not provided).
 
@@ -372,10 +372,15 @@ model_path = ""             # REQUIRED — path to OPF checkpoint dir
 log_level = "INFO"          # Python logging level
 
 [hook]
-base_url = "http://127.0.0.1:8765"  # Service URL hooks call
+base_url = "http://192.168.88.75:8765"  # Primary OPF service URL hooks call
 request_timeout_s = 5.0             # Hook HTTP timeout (1-60 seconds)
 max_file_bytes = 262144             # Max file size hooks send (<= 1048576)
 max_inflight_warns_per_5min = 1     # Rate limit for repeated warnings
+
+[fallback]
+host = "127.0.0.1"                  # Local rules-only fallback listen address
+port = 8766                         # Local rules-only fallback listen port
+base_url = "http://127.0.0.1:8766"  # Hook fallback URL when OPF is unavailable
 ```
 
 ### Environment variable overrides
@@ -396,6 +401,9 @@ All config keys can be overridden by env vars (loaded after TOML):
 | `PRIVACY_FILTER_TIMEOUT_S` | `hook.request_timeout_s` | float |
 | `PRIVACY_FILTER_MAX_FILE_BYTES` | `hook.max_file_bytes` | int |
 | `PRIVACY_FILTER_MAX_INFLIGHT_WARNS` | `hook.max_inflight_warns_per_5min` | int |
+| `PRIVACY_FILTER_FALLBACK_HOST` | `fallback.host` | str |
+| `PRIVACY_FILTER_FALLBACK_PORT` | `fallback.port` | int |
+| `PRIVACY_FILTER_FALLBACK_URL` | `fallback.base_url` | str |
 | `OPF_CHECKPOINT` | `service.model_path` (fallback) | str |
 
 Resolution order: TOML → `PRIVACY_FILTER_*` env → `OPF_CHECKPOINT` fallback.
@@ -643,7 +651,8 @@ Key functions:
 
 | Function | Description |
 |----------|-------------|
-| `pf_url()` | Returns `PRIVACY_FILTER_URL` or default `http://127.0.0.1:8765` |
+| `pf_url()` | Returns `PRIVACY_FILTER_URL` or default `http://192.168.88.75:8765` |
+| `pf_fallback_url()` | Returns `PRIVACY_FILTER_FALLBACK_URL` or default `http://127.0.0.1:8766` |
 | `pf_skip_active()` | Returns 0 if `PRIVACY_FILTER_SKIP=1` |
 | `pf_is_text_file <path>` | Returns 0 if file is UTF-8 text, not binary/symlink/submodule/LFS |
 | `pf_is_lfs_pointer <path>` | Returns 0 if file is a Git LFS pointer |
@@ -753,17 +762,17 @@ For boot-time availability: `loginctl enable-linger $USER`
 
 ```bash
 cd ~/project/docker/privacy-filter-service
-uv run pytest -q              # 68 tests, no GPU required
-uv run pytest -q -m gpu       # 1 test, requires GPU
+uv run pytest -q              # Unit tests, no GPU required
+uv run pytest -q -m gpu       # GPU tests
 ```
 
 ### Integration tests (hooks)
 
 ```bash
-bash tests/integration/run_all.sh   # 13 tests in isolated /tmp repos
+bash tests/integration/run_all.sh   # Hook integration tests in isolated /tmp repos
 ```
 
-Tests: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment preservation, service-down fail-open, skip env bypass, no-verify bypass, concurrent commits, installer collision/force/uninstall.
+Tests: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment preservation, local fallback, service-down fail-open, skip env bypass, no-verify bypass, concurrent commits, installer collision/force/uninstall.
 
 ### End-to-end smoke
 
@@ -1133,7 +1142,7 @@ class ServiceConfig(BaseModel):
 class HookConfig(BaseModel):
     """Configuration for the Git pre-receive hook client."""
 
-    base_url: str = "http://127.0.0.1:8765"
+    base_url: str = "http://192.168.88.75:8765"
     request_timeout_s: float = Field(default=5.0, ge=1, le=60)
     max_file_bytes: int = Field(default=262144, le=1_048_576)
     max_inflight_warns_per_5min: int = 1

@@ -9,9 +9,16 @@ fi
 
 msg_file="${1:?usage: commit-msg <message-file>}"
 
-if ! _pf_service_ready; then
+active_backend=""
+active_url=""
+if ! active_backend="$(pf_active_backend)"; then
   pf_warn_once unavailable "service unavailable, skipping commit-msg redaction"
   exit 0
+fi
+if [ "$active_backend" = "fallback" ]; then
+  active_url="$(pf_fallback_url)"
+else
+  active_url="$(pf_url)"
 fi
 
 pf_ensure_dir
@@ -77,7 +84,7 @@ fi
 
 json_payload="$(python3 -c 'import json, pathlib, sys; print(json.dumps({"text": pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")}))' "$protected_file")"
 
-if ! printf '%s' "$json_payload" | pf_post_json /redact/text > "$redacted_file" 2> "$http_meta_file"; then
+if ! printf '%s' "$json_payload" | pf_post_json /redact/text "$active_url" > "$redacted_file" 2> "$http_meta_file"; then
   pf_warn_once redact-error "commit-msg redaction failed, message unchanged"
   exit 0
 fi
@@ -110,7 +117,7 @@ fi
 cp "$final_file" "$msg_file"
 
 json_result=""
-if json_result="$(printf '%s' "$json_payload" | pf_post_json /redact 2> "$summary_meta_file")"; then
+if json_result="$(printf '%s' "$json_payload" | pf_post_json /redact "$active_url" 2> "$summary_meta_file")"; then
   summary_http_code="$(python3 -c 'import sys; data = sys.stdin.read().splitlines(); print(data[-1].split(":", 1)[1] if data else "0")' < "$summary_meta_file")"
   if [ "$summary_http_code" != "200" ]; then
     json_result=""
@@ -137,6 +144,9 @@ items = sorted(data.get("summary", {}).get("by_label", {}).items())
 print(", ".join(f"{key}:{value}" for key, value in items))')"
 fi
 
+if [ "$active_backend" = "fallback" ]; then
+  printf 'commit message: local fallback used (OPF service unavailable)\n' >&2
+fi
 if [ -z "$by_label" ]; then
   printf 'commit message: %s PII spans redacted\n' "$span_count" >&2
 else

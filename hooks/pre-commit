@@ -11,18 +11,22 @@ if pf_skip_active; then
   exit 0
 fi
 
-health_response=""
-if ! health_response="$(curl -fsS -m 2 "$(pf_url)/health" 2>/dev/null)"; then
+active_backend=""
+active_url=""
+if ! active_backend="$(pf_active_backend)"; then
   pf_warn_once unavailable "service down, fail-open"
   exit 0
 fi
-
-if ! printf '%s' "$health_response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") else 1)'; then
-  pf_warn_once unavailable "service down, fail-open"
-  exit 0
+if [ "$active_backend" = "fallback" ]; then
+  active_url="$(pf_fallback_url)"
+else
+  active_url="$(pf_url)"
 fi
 
-mapfile -t staged_paths < <(git diff --cached --name-only --diff-filter=ACM)
+staged_paths=()
+while IFS= read -r path; do
+  staged_paths+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACM)
 
 if [ "${#staged_paths[@]}" -eq 0 ]; then
   exit 0
@@ -42,7 +46,8 @@ redacted_root="$privacy_dir/redacted"
 mkdir -p "$orig_root" "$redacted_root"
 
 declare -a pii_paths=()
-declare -A label_counts=()
+label_counts_file="$privacy_dir/label-counts-$$.tsv"
+: > "$label_counts_file"
 total_spans=0
 
 for path in "${staged_paths[@]}"; do
@@ -68,7 +73,7 @@ for path in "${staged_paths[@]}"; do
   fi
 
   http_meta_file="$privacy_dir/http-$$.meta"
-  if ! response="$(python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))' < "$orig_file" | pf_post_json /redact 2> "$http_meta_file")"; then
+  if ! response="$(python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))' < "$orig_file" | pf_post_json /redact "$active_url" 2> "$http_meta_file")"; then
     pf_warn_once unavailable "redaction request failed, fail-open"
     exit 0
   fi
@@ -96,7 +101,7 @@ for path in "${staged_paths[@]}"; do
   fi
   while IFS=$'\t' read -r label count; do
     [ -n "$label" ] || continue
-    label_counts["$label"]=$(( ${label_counts["$label"]:-0} + count ))
+    printf '%s\t%s\n' "$label" "$count" >> "$label_counts_file"
   done < <(printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); by_label = data.get("summary", {}).get("by_label", {});
 for key, value in by_label.items():
     print(f"{key}\t{value}")')
@@ -122,12 +127,13 @@ if ! git apply --check "$patch_file" >/dev/null 2>&1; then
   exit 0
 fi
 
+if [ "$active_backend" = "fallback" ]; then
+  printf '[privacy-filter] local fallback used: OPF service unavailable\n' >&2
+fi
 printf '[privacy-filter] blocked commit: detected PII in %s staged file(s), %s span(s)\n' "${#pii_paths[@]}" "$total_spans" >&2
-if [ "${#label_counts[@]}" -gt 0 ]; then
+if [ -s "$label_counts_file" ]; then
   printf '[privacy-filter] by label:' >&2
-  for label in "${!label_counts[@]}"; do
-    printf ' %s=%s' "$label" "${label_counts[$label]}" >&2
-  done
+  awk -F '\t' '{ counts[$1] += $2 } END { for (label in counts) printf " %s=%s", label, counts[label] }' "$label_counts_file" >&2
   printf '\n' >&2
 fi
 printf '[privacy-filter] review patch: %s\n' "$patch_file" >&2

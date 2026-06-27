@@ -30,6 +30,9 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PRIVACY_FILTER_TIMEOUT_S": "hook.request_timeout_s",
     "PRIVACY_FILTER_MAX_FILE_BYTES": "hook.max_file_bytes",
     "PRIVACY_FILTER_MAX_INFLIGHT_WARNS": "hook.max_inflight_warns_per_5min",
+    "PRIVACY_FILTER_FALLBACK_HOST": "fallback.host",
+    "PRIVACY_FILTER_FALLBACK_PORT": "fallback.port",
+    "PRIVACY_FILTER_FALLBACK_URL": "fallback.base_url",
 }
 
 
@@ -51,6 +54,7 @@ def _apply_env_overlays(raw: dict) -> dict:
             "hook.request_timeout_s",
             "hook.max_file_bytes",
             "hook.max_inflight_warns_per_5min",
+            "fallback.port",
         ):
             try:
                 val = int(val)  # type: ignore[assignment]
@@ -79,10 +83,18 @@ class ServiceConfig(BaseModel):
 class HookConfig(BaseModel):
     """Configuration for the Git pre-receive hook client."""
 
-    base_url: str = "http://127.0.0.1:8765"
+    base_url: str = "http://192.168.88.75:8765"
     request_timeout_s: float = Field(default=5.0, ge=1, le=60)
     max_file_bytes: int = Field(default=262144, le=1_048_576)
     max_inflight_warns_per_5min: int = 1
+
+
+class FallbackConfig(BaseModel):
+    """Configuration for the local rules-only fallback service."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8766, ge=1, le=65535)
+    base_url: str = "http://127.0.0.1:8766"
 
 
 class Settings(BaseModel):
@@ -90,6 +102,7 @@ class Settings(BaseModel):
 
     service: ServiceConfig
     hook: HookConfig = Field(default_factory=HookConfig)
+    fallback: FallbackConfig = Field(default_factory=FallbackConfig)
 
     @model_validator(mode="after")
     def validate_backend_constraints(self) -> Settings:
