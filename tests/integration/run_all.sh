@@ -14,6 +14,8 @@ tests=(
   test_commit_msg_redact.sh
   test_commit_msg_clean.sh
   test_commit_msg_comment.sh
+  test_fallback_service.sh
+  test_commit_msg_fallback_service.sh
   test_service_down.sh
   test_skip_env.sh
   test_no_verify.sh
@@ -23,6 +25,8 @@ tests=(
 declare -a temp_roots=()
 declare -a passed=()
 declare -a failed=()
+passed_count=0
+failed_count=0
 
 cleanup() {
   local dir
@@ -45,21 +49,25 @@ for test_name in "${tests[@]}"; do
   printf '==> %s\n' "$test_name"
   if PF_IT_ROOT="$temp_root" bash "$test_path"; then
     passed+=("$test_name")
+    passed_count=$((passed_count + 1))
   else
     failed+=("$test_name")
+    failed_count=$((failed_count + 1))
   fi
 done
 
 printf '\nSummary\n'
-printf 'PASS %s\n' "${#passed[@]}"
+printf 'PASS %s\n' "$passed_count"
 for test_name in "${passed[@]}"; do
   printf '  PASS %s\n' "$test_name"
 done
-printf 'FAIL %s\n' "${#failed[@]}"
-for test_name in "${failed[@]}"; do
-  printf '  FAIL %s\n' "$test_name"
-done
+printf 'FAIL %s\n' "$failed_count"
+if [ "$failed_count" -gt 0 ]; then
+  for test_name in "${failed[@]}"; do
+    printf '  FAIL %s\n' "$test_name"
+  done
+fi
 
-if [ "${#failed[@]}" -gt 0 ]; then
+if [ "$failed_count" -gt 0 ]; then
   exit 1
 fi

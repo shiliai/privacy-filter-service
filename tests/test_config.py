@@ -21,7 +21,7 @@ model_path = "/mnt/LLM/OpenAI/privacy_filter"
 log_level = "INFO"
 
 [hook]
-base_url = "http://127.0.0.1:8765"
+base_url = "http://192.168.88.75:8765"
 request_timeout_s = 5.0
 max_file_bytes = 262144
 max_inflight_warns_per_5min = 1
@@ -39,7 +39,7 @@ class TestLoadSettings:
         assert s.service.decode_backend == "upstream"
         assert s.service.model_path == "/mnt/LLM/OpenAI/privacy_filter"
         assert s.service.log_level == "INFO"
-        assert s.hook.base_url == "http://127.0.0.1:8765"
+        assert s.hook.base_url == "http://192.168.88.75:8765"
         assert s.hook.request_timeout_s == 5.0
         assert s.hook.max_file_bytes == 262144
         assert s.hook.max_inflight_warns_per_5min == 1
@@ -138,10 +138,33 @@ class TestLoadSettings:
     def test_hook_defaults_when_missing(self):
         toml = VALID_TOML.split("[hook]")[0]
         s = load_settings(config_text=toml)
-        assert s.hook.base_url == "http://127.0.0.1:8765"
+        assert s.hook.base_url == "http://192.168.88.75:8765"
         assert s.hook.request_timeout_s == 5.0
         assert s.hook.max_file_bytes == 262144
         assert s.hook.max_inflight_warns_per_5min == 1
+        assert s.fallback.host == "127.0.0.1"
+        assert s.fallback.port == 8766
+        assert s.fallback.base_url == "http://127.0.0.1:8766"
+
+    def test_fallback_config_defaults(self):
+        s = load_settings(config_text=VALID_TOML)
+        assert s.fallback.host == "127.0.0.1"
+        assert s.fallback.port == 8766
+        assert s.fallback.base_url == "http://127.0.0.1:8766"
+
+    def test_fallback_env_overrides(self):
+        with patch.dict(
+            os.environ,
+            {
+                "PRIVACY_FILTER_FALLBACK_HOST": "0.0.0.0",
+                "PRIVACY_FILTER_FALLBACK_PORT": "9876",
+                "PRIVACY_FILTER_FALLBACK_URL": "http://127.0.0.1:9876",
+            },
+        ):
+            s = load_settings(config_text=VALID_TOML)
+        assert s.fallback.host == "0.0.0.0"
+        assert s.fallback.port == 9876
+        assert s.fallback.base_url == "http://127.0.0.1:9876"
 
     def test_settings_model_validate_directly(self):
         data = {

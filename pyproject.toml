@@ -9,9 +9,11 @@ description = "FastAPI service wrapping the local OPF privacy filter model."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "detect-secrets",
   "fastapi",
   "uvicorn[standard]",
   "pydantic>=2",
+  "presidio-analyzer",
   "opf @ file:///home/chriswang/project/docker/privacy-filter",
   "tomli; python_version<\"3.11\"",
 ]
@@ -26,6 +28,7 @@ dev = [
 
 [project.scripts]
 privacy-filter-service = "privacy_filter_service.app:main"
+privacy-filter-fallback-service = "privacy_filter_service.fallback_app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

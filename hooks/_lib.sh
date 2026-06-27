@@ -1,19 +1,38 @@
 #!/usr/bin/env bash
 
 pf_url() {
-  printf '%s' "${PRIVACY_FILTER_URL:-http://127.0.0.1:8765}"
+  printf '%s' "${PRIVACY_FILTER_URL:-http://192.168.88.75:8765}"
+}
+
+pf_fallback_url() {
+  printf '%s' "${PRIVACY_FILTER_FALLBACK_URL:-http://127.0.0.1:8766}"
 }
 
 pf_skip_active() {
   [ "${PRIVACY_FILTER_SKIP:-0}" = "1" ]
 }
 
-_pf_service_ready() {
-  local response
-  if ! response="$(curl -fsS -m 2 "$(pf_url)/health" 2>/dev/null)"; then
+_pf_url_ready() {
+  local base_url response
+  base_url="$1"
+  if ! response="$(curl -fsS -m 2 "$base_url/health" 2>/dev/null)"; then
     return 1
   fi
   printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") is True else 1)'
+}
+
+# Probe primary OPF then local fallback; print "opf" or "fallback" and return 0
+# on the first healthy backend, return 1 if neither is reachable (fail-open).
+pf_active_backend() {
+  if _pf_url_ready "$(pf_url)"; then
+    printf '%s' "opf"
+    return 0
+  fi
+  if _pf_url_ready "$(pf_fallback_url)"; then
+    printf '%s' "fallback"
+    return 0
+  fi
+  return 1
 }
 
 pf_git_dir() {
@@ -109,7 +128,11 @@ pf_is_text_file() {
 pf_post_json() {
   local endpoint url timeout response curl_status body http_code
   endpoint="$1"
-  url="$(pf_url)${endpoint}"
+  if [ "$#" -ge 2 ]; then
+    url="${2}${endpoint}"
+  else
+    url="$(pf_url)${endpoint}"
+  fi
   timeout="${PRIVACY_FILTER_TIMEOUT_S:-5}"
 
   response="$(curl -sS --max-time "$timeout" -X POST -H 'Content-Type: application/json' --data-binary @- --write-out $'\nHTTP:%{http_code}' "$url")"

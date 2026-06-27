@@ -1,7 +1,7 @@
 # Privacy Filter Service — LLM Agent Reference
 
 > Self-contained, complete, up-to-date API reference for agents.
-> Last updated: 2026-05-12
+> Last updated: 2026-06-27
 
 ---
 
@@ -16,6 +16,7 @@
 **Key properties**:
 - All inference runs locally. No data leaves the machine.
 - Fail-open: service down → warn + skip, never block developer workflow.
+- Optional local rules-only fallback service keeps hooks scanning (email/phone/URL/secret) when the primary OPF is unreachable.
 - Sanitized logging: no raw text in journald.
 - 8 PII label types detected.
 
@@ -24,21 +25,34 @@
 ## Architecture
 
 ```
-+------------------+        HTTP POST         +-------------------------+
-|  git pre-commit  |  --------------------->  |  Privacy Filter Service |
-|  git commit-msg  |  /redact  /redact/text   |  (FastAPI + OPF model)  |
-+------------------+  /redact/batch           +-------------------------+
-        |                                               |
-        | blocks commit + writes patch                  | loads model at startup
-        v                                               v
++------------------+   pf_active_backend()    +-----------------------------+
+|  git pre-commit  |   probes /health on      |  Primary OPF service        |
+|  git commit-msg  |   PRIMARY, then FALLBACK  |  (FastAPI + OPF model, GPU) |
++------------------+   uses first ready one    |  default 192.168.88.75:8765 |
+        |              ----------+-----------> +-----------------------------+
+        |   HTTP POST             | (down/unreachable)
+        |   /redact  /redact/text v
+        |   /redact/batch   +-----------------------------+
+        |                   |  Local fallback service     |
+        |                   |  (FastAPI + Presidio rules, |  default 127.0.0.1:8766
+        |                   |   no GPU / no OPF model)    |
+        |                   +-----------------------------+
+        | blocks commit + writes patch
+        v
    redact-*.patch (in .git/privacy-filter/)      ~/.config/privacy-filter/config.toml
 ```
+
+**Failover**: hooks call `pf_active_backend()`, which probes the primary OPF `/health`
+first; if it is not ready within 2 s the local fallback is probed and used instead.
+If neither is reachable the hook fails open (warn + exit 0). The fallback exposes the
+same OPF-compatible routes but uses high-confidence rules only — see
+[Local Fallback Service](#local-fallback-service) below.
 
 ---
 
 ## API Endpoints
 
-Base URL: `http://127.0.0.1:8765` (configurable)
+Base URL: primary OPF defaults to `http://192.168.88.75:8765`; local service examples use `http://127.0.0.1:8765`.
 
 All endpoints return `X-Request-ID` header (UUID4 generated if not provided).
 
@@ -351,6 +365,65 @@ The model detects and redacts 8 categories:
 
 ---
 
+## Local Fallback Service
+
+A second, lightweight FastAPI service that provides **OPF-compatible redaction
+without a GPU or the OPF model checkpoint**. It is meant to run on a developer
+laptop or CPU host so commits are still scanned when the primary OPF (on the
+remote GPU host) is unreachable.
+
+### Run it
+
+```bash
+cd ~/project/docker/privacy-filter-service
+PYTHONPATH=src .venv/bin/privacy-filter-fallback-service
+# or: PYTHONPATH=src .venv/bin/python -m privacy_filter_service.fallback_app
+```
+
+Listens on `[fallback].host:[fallback].port` (default `127.0.0.1:8766`).
+Configuration comes from the same `~/.config/privacy-filter/config.toml`; only
+the `[fallback]` table is read (the `[service]`/OPF sections are ignored, so no
+`model_path` is required).
+
+### API
+
+Same routes and response schema as the primary service, with rule-based results:
+
+| Endpoint | Behavior |
+|----------|----------|
+| `GET /health` | `{"ready": true, "device": "local-rules", ...}` — always ready, no warmup |
+| `GET /model-info` | `device="local-rules"`, `decode_backend="local_fallback"`, full label list |
+| `POST /redact` | Full `RedactionResult` JSON (same schema as primary) |
+| `POST /redact/text` | Redacted plain text |
+| `POST /redact/batch` | Up to 100 texts; 413 over the limit |
+
+Responses carry `warning: "local rules-only fallback; not equivalent to OPF model detection"`.
+
+### Coverage
+
+| Detected (rules) | Label | Sources |
+|------------------|-------|---------|
+| Email | `private_email` | Presidio regex |
+| Phone (NANP) | `private_phone` | Presidio regex |
+| URL / bare domain | `private_url` | Presidio regex |
+| API keys, passwords | `secret` | detect-secrets (keyword/private-key/jwt/openai) + `sk-*`, JWT, PEM private-key regex |
+
+**Not covered** by the fallback (require the OPF model): `private_person`,
+`private_date`, `private_address`, `account_number`. Overlapping spans are
+resolved greedily (longest first, email/secret prioritized) so e.g. a JWT-like
+fragment inside an email is collapsed into the email span.
+
+### CLI
+
+The same engine is available as a standalone CLI (no HTTP server needed):
+
+```bash
+PYTHONPATH=src .venv/bin/python -m privacy_filter_service.local_fallback "Email alice@example.com"
+PYTHONPATH=src .venv/bin/python -m privacy_filter_service.local_fallback --format text < file.txt
+```
+
+---
+
 ## Configuration
 
 ### Config file location
@@ -372,10 +445,15 @@ model_path = ""             # REQUIRED — path to OPF checkpoint dir
 log_level = "INFO"          # Python logging level
 
 [hook]
-base_url = "http://127.0.0.1:8765"  # Service URL hooks call
+base_url = "http://192.168.88.75:8765"  # Primary OPF service URL hooks call
 request_timeout_s = 5.0             # Hook HTTP timeout (1-60 seconds)
 max_file_bytes = 262144             # Max file size hooks send (<= 1048576)
 max_inflight_warns_per_5min = 1     # Rate limit for repeated warnings
+
+[fallback]
+host = "127.0.0.1"                  # Local rules-only fallback listen address
+port = 8766                         # Local rules-only fallback listen port
+base_url = "http://127.0.0.1:8766"  # Hook fallback URL when OPF is unavailable
 ```
 
 ### Environment variable overrides
@@ -396,6 +474,9 @@ All config keys can be overridden by env vars (loaded after TOML):
 | `PRIVACY_FILTER_TIMEOUT_S` | `hook.request_timeout_s` | float |
 | `PRIVACY_FILTER_MAX_FILE_BYTES` | `hook.max_file_bytes` | int |
 | `PRIVACY_FILTER_MAX_INFLIGHT_WARNS` | `hook.max_inflight_warns_per_5min` | int |
+| `PRIVACY_FILTER_FALLBACK_HOST` | `fallback.host` | str |
+| `PRIVACY_FILTER_FALLBACK_PORT` | `fallback.port` | int |
+| `PRIVACY_FILTER_FALLBACK_URL` | `fallback.base_url` | str |
 | `OPF_CHECKPOINT` | `service.model_path` (fallback) | str |
 
 Resolution order: TOML → `PRIVACY_FILTER_*` env → `OPF_CHECKPOINT` fallback.
@@ -643,7 +724,10 @@ Key functions:
 
 | Function | Description |
 |----------|-------------|
-| `pf_url()` | Returns `PRIVACY_FILTER_URL` or default `http://127.0.0.1:8765` |
+| `pf_url()` | Returns `PRIVACY_FILTER_URL` or default `http://192.168.88.75:8765` |
+| `pf_fallback_url()` | Returns `PRIVACY_FILTER_FALLBACK_URL` or default `http://127.0.0.1:8766` |
+| `pf_active_backend()` | Probes OPF then fallback `/health`; echoes `opf` or `fallback`, returns 0 on first ready backend, 1 if both down |
+| `_pf_url_ready <base_url>` | Returns 0 if `<base_url>/health` returns `ready=true` (2 s curl timeout) |
 | `pf_skip_active()` | Returns 0 if `PRIVACY_FILTER_SKIP=1` |
 | `pf_is_text_file <path>` | Returns 0 if file is UTF-8 text, not binary/symlink/submodule/LFS |
 | `pf_is_lfs_pointer <path>` | Returns 0 if file is a Git LFS pointer |
@@ -652,7 +736,6 @@ Key functions:
 | `pf_warn_once <key> <msg>` | Rate-limited warning (once per 5 min per key) |
 | `pf_fail_open <reason>` | Print warning + exit 0 |
 | `pf_ensure_dir` | Create `.git/privacy-filter/` with 0700 perms |
-| `pf_service_ready` | Check `/health` returns `ready=true` |
 | `pf_cleanup_old_patches` | Delete patches older than 24 hours |
 
 ---
@@ -709,6 +792,21 @@ bash install/install-service.sh
 
 This: creates venv, installs deps, deploys config.toml + env, installs systemd user unit, starts service, waits for health.
 
+### Run the local fallback service
+
+The fallback needs no GPU/checkpoint and reads only the `[fallback]` table, so it
+can run on a laptop or CPU host alongside (or instead of) the primary OPF:
+
+```bash
+cd ~/project/docker/privacy-filter-service
+PYTHONPATH=src .venv/bin/privacy-filter-fallback-service
+```
+
+Listens on `[fallback].host:[fallback].port` (default `127.0.0.1:8766`). Hooks
+discover it automatically via `pf_active_backend()` when the primary OPF is down.
+There is no systemd unit for the fallback — run it in a terminal, tmux, or a
+user unit of your own if you want it always-on.
+
 ### Install hooks
 
 ```bash
@@ -753,25 +851,31 @@ For boot-time availability: `loginctl enable-linger $USER`
 
 ```bash
 cd ~/project/docker/privacy-filter-service
-uv run pytest -q              # 68 tests, no GPU required
-uv run pytest -q -m gpu       # 1 test, requires GPU
+uv run pytest -q              # Unit tests, no GPU required
+uv run pytest -q -m gpu       # GPU tests
 ```
 
 ### Integration tests (hooks)
 
 ```bash
-bash tests/integration/run_all.sh   # 13 tests in isolated /tmp repos
+bash tests/integration/run_all.sh   # Hook integration tests in isolated /tmp repos
 ```
 
-Tests: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment preservation, service-down fail-open, skip env bypass, no-verify bypass, concurrent commits, installer collision/force/uninstall.
+Tests: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment preservation, local fallback, service-down fail-open, skip env bypass, no-verify bypass, concurrent commits, installer collision/force/uninstall.
 
 ### End-to-end smoke
 
 ```bash
-bash tests/e2e/smoke.sh   # 7 scenarios, idempotent, <60s
+bash tests/e2e/smoke.sh           # install lifecycle, idempotent, <60s
+bash tests/e2e/remote_fallback.sh # remote OPF primary + local fallback failover
 ```
 
-Full lifecycle: install → hook tests → journal leak check → uninstall → cleanup.
+`smoke.sh`: full lifecycle install → hook tests → journal leak check → uninstall → cleanup.
+
+`remote_fallback.sh`: requires the primary OPF reachable at `PRIVACY_FILTER_URL`
+(default `http://192.168.88.75:8765`); starts the local fallback on `127.0.0.1:8766`
+and verifies (1) the primary blocks PII, (2) the fallback blocks PII when the
+primary is unreachable, (3) the fallback redacts a commit message.
 
 ---
 
@@ -788,8 +892,12 @@ privacy-filter-service/
 │   └── env.example                         # Environment variable template
 ├── src/privacy_filter_service/
 │   ├── __init__.py                         # Package init
-│   ├── app.py                              # FastAPI factory, routes, entrypoint
-│   ├── config.py                           # TOML + env config loader
+│   ├── app.py                              # FastAPI factory, routes, entrypoint (primary OPF)
+│   ├── config.py                           # TOML + env config loader (service + hook + fallback)
+│   ├── fallback_app.py                     # Local rules-only fallback FastAPI service
+│   ├── local_fallback.py                   # Presidio/detect-secrets rules redactor + CLI
+│   ├── fast_predict.py                     # GPU-decode path (jit_gpu backend)
+│   ├── viterbi_gpu.py                      # JIT-compiled GPU Viterbi decode
 │   ├── logging_setup.py                    # Sanitized JSON logging + middleware
 │   ├── models.py                           # Pydantic request/response models
 │   └── opf_engine.py                       # Async OPF wrapper with Lock
@@ -812,13 +920,18 @@ privacy-filter-service/
 │   ├── test_health.py                      # /health + /model-info tests
 │   ├── test_redact.py                      # /redact + /redact/text tests
 │   ├── test_batch.py                       # /redact/batch tests
+│   ├── test_fallback_app.py                # Fallback service route tests
+│   ├── test_local_fallback.py              # Rules redactor tests
 │   ├── integration/                        # Bash integration tests
 │   │   ├── run_all.sh                      # Test runner
 │   │   ├── common.sh                       # Shared helpers
 │   │   ├── mock_service.py                 # Mock HTTP service
-│   │   └── test_*.sh                       # Individual test scripts
+│   │   └── test_*.sh                       # Individual test scripts (incl. fallback)
 │   └── e2e/
-│       └── smoke.sh                        # End-to-end smoke test
+│       ├── smoke.sh                        # Install lifecycle smoke test
+│       └── remote_fallback.sh              # Remote OPF + local fallback e2e
+├── scripts/                                # Benchmark / comparison scripts
+├── benchmarks/                             # Benchmark result artifacts
 └── docs/
     └── llms-full.txt                       # This file
 ```
@@ -1084,6 +1197,9 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PRIVACY_FILTER_TIMEOUT_S": "hook.request_timeout_s",
     "PRIVACY_FILTER_MAX_FILE_BYTES": "hook.max_file_bytes",
     "PRIVACY_FILTER_MAX_INFLIGHT_WARNS": "hook.max_inflight_warns_per_5min",
+    "PRIVACY_FILTER_FALLBACK_HOST": "fallback.host",
+    "PRIVACY_FILTER_FALLBACK_PORT": "fallback.port",
+    "PRIVACY_FILTER_FALLBACK_URL": "fallback.base_url",
 }
 
 
@@ -1105,6 +1221,7 @@ def _apply_env_overlays(raw: dict) -> dict:
             "hook.request_timeout_s",
             "hook.max_file_bytes",
             "hook.max_inflight_warns_per_5min",
+            "fallback.port",
         ):
             try:
                 val = int(val)
@@ -1133,10 +1250,18 @@ class ServiceConfig(BaseModel):
 class HookConfig(BaseModel):
     """Configuration for the Git pre-receive hook client."""
 
-    base_url: str = "http://127.0.0.1:8765"
+    base_url: str = "http://192.168.88.75:8765"
     request_timeout_s: float = Field(default=5.0, ge=1, le=60)
     max_file_bytes: int = Field(default=262144, le=1_048_576)
     max_inflight_warns_per_5min: int = 1
+
+
+class FallbackConfig(BaseModel):
+    """Configuration for the local rules-only fallback service."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8766, ge=1, le=65535)
+    base_url: str = "http://127.0.0.1:8766"
 
 
 class Settings(BaseModel):
@@ -1144,6 +1269,7 @@ class Settings(BaseModel):
 
     service: ServiceConfig
     hook: HookConfig = Field(default_factory=HookConfig)
+    fallback: FallbackConfig = Field(default_factory=FallbackConfig)
 
     @model_validator(mode="after")
     def validate_backend_constraints(self) -> Settings:

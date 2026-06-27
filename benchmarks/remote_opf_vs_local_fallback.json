@@ -1,0 +1,339 @@
+{
+  "system_info": {
+    "client": {
+      "cpu": "arm",
+      "logical_cores": 8,
+      "os": "Darwin 25.5.0",
+      "machine": "arm64",
+      "python": "3.12.11"
+    }
+  },
+  "service_info": {
+    "url": "http://192.168.88.75:8765",
+    "health": {
+      "ready": true,
+      "device": "cuda",
+      "uptime_s": 166758.08,
+      "version": "0.1.0"
+    },
+    "model_info": {
+      "device": "cuda",
+      "labels": [
+        "account_number",
+        "private_address",
+        "private_email",
+        "private_person",
+        "private_phone",
+        "private_url",
+        "private_date",
+        "secret"
+      ],
+      "output_mode": "typed",
+      "decode_mode": "viterbi",
+      "version": "0.1.0"
+    }
+  },
+  "base_text": "Test doc with email alice@example.com and phone 415-555-1212. OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890 ",
+  "sizes": [
+    10,
+    50,
+    100,
+    300
+  ],
+  "num_runs": 10,
+  "cli_runs": 3,
+  "latency_results": [
+    {
+      "mode": "remote_opf_http",
+      "text_chars": 1220,
+      "n": 10,
+      "best_ms": 37.165624962653965,
+      "p50_ms": 45.774250000249594,
+      "p95_ms": 93.8553023239364,
+      "max_ms": 127.67420901218429,
+      "mean_ms": 52.89429579861462,
+      "span_count": 27
+    },
+    {
+      "mode": "remote_opf_http",
+      "text_chars": 6100,
+      "n": 10,
+      "best_ms": 96.74391697626561,
+      "p50_ms": 106.1625829897821,
+      "p95_ms": 164.4165036763297,
+      "max_ms": 174.044291023165,
+      "mean_ms": 119.524641596945,
+      "span_count": 147
+    },
+    {
+      "mode": "remote_opf_http",
+      "text_chars": 12200,
+      "n": 10,
+      "best_ms": 166.97708400897682,
+      "p50_ms": 172.72495798533782,
+      "p95_ms": 201.42736249836162,
+      "max_ms": 205.24775004014373,
+      "mean_ms": 179.16240830090828,
+      "span_count": 297
+    },
+    {
+      "mode": "remote_opf_http",
+      "text_chars": 36600,
+      "n": 10,
+      "best_ms": 498.4926669858396,
+      "p50_ms": 530.2359164925292,
+      "p95_ms": 545.5462187266676,
+      "max_ms": 545.8772499696352,
+      "mean_ms": 525.2492040919606,
+      "span_count": 897
+    },
+    {
+      "mode": "local_fallback_inprocess",
+      "text_chars": 1220,
+      "n": 10,
+      "best_ms": 2.3857500054873526,
+      "p50_ms": 2.4581460165791214,
+      "p95_ms": 2.8708204976283014,
+      "max_ms": 2.9528330196626484,
+      "mean_ms": 2.5232082058209926,
+      "span_count": 30
+    },
+    {
+      "mode": "local_fallback_inprocess",
+      "text_chars": 6100,
+      "n": 10,
+      "best_ms": 6.1315419734455645,
+      "p50_ms": 6.814208492869511,
+      "p95_ms": 10.629916706238873,
+      "max_ms": 10.729292000178248,
+      "mean_ms": 7.919941691216081,
+      "span_count": 150
+    },
+    {
+      "mode": "local_fallback_inprocess",
+      "text_chars": 12200,
+      "n": 10,
+      "best_ms": 13.132041960489005,
+      "p50_ms": 13.666521001141518,
+      "p95_ms": 16.729481270886023,
+      "max_ms": 18.096750020049512,
+      "mean_ms": 14.216695993673056,
+      "span_count": 300
+    },
+    {
+      "mode": "local_fallback_inprocess",
+      "text_chars": 36600,
+      "n": 10,
+      "best_ms": 49.49720797594637,
+      "p50_ms": 54.13191701518372,
+      "p95_ms": 121.49794359283979,
+      "max_ms": 160.62849998706952,
+      "mean_ms": 65.72987079853192,
+      "span_count": 900
+    },
+    {
+      "mode": "local_fallback_cli",
+      "text_chars": 1220,
+      "n": 3,
+      "best_ms": 842.616000038106,
+      "p50_ms": 863.5520410025492,
+      "p95_ms": 974.572328524664,
+      "max_ms": 986.9079160271212,
+      "mean_ms": 897.6919856892588,
+      "span_count": 30
+    },
+    {
+      "mode": "local_fallback_cli",
+      "text_chars": 6100,
+      "n": 3,
+      "best_ms": 819.6465420187451,
+      "p50_ms": 845.5997089622542,
+      "p95_ms": 862.988083390519,
+      "max_ms": 864.9201249936596,
+      "mean_ms": 843.3887919915529,
+      "span_count": 150
+    },
+    {
+      "mode": "local_fallback_cli",
+      "text_chars": 12200,
+      "n": 3,
+      "best_ms": 751.4477919903584,
+      "p50_ms": 763.9929999713786,
+      "p95_ms": 779.8284244141541,
+      "max_ms": 781.587916018907,
+      "mean_ms": 765.676235993548,
+      "span_count": 300
+    },
+    {
+      "mode": "local_fallback_cli",
+      "text_chars": 36600,
+      "n": 3,
+      "best_ms": 760.2702499716543,
+      "p50_ms": 760.5180419632234,
+      "p95_ms": 776.034379506018,
+      "max_ms": 777.758417010773,
+      "mean_ms": 766.1822363152169,
+      "span_count": 900
+    }
+  ],
+  "functional_results": [
+    {
+      "case": "email_phone",
+      "mode": "remote_opf_http",
+      "span_count": 3,
+      "labels": {
+        "private_email": 1,
+        "private_person": 1,
+        "private_phone": 1
+      },
+      "redacted_text": "Contact <PRIVATE_PERSON> at <PRIVATE_EMAIL> or <PRIVATE_PHONE>."
+    },
+    {
+      "case": "email_phone",
+      "mode": "local_fallback_inprocess",
+      "span_count": 2,
+      "labels": {
+        "private_email": 1,
+        "private_phone": 1
+      },
+      "redacted_text": "Contact Alice at <PRIVATE_EMAIL> or <PRIVATE_PHONE>."
+    },
+    {
+      "case": "url",
+      "mode": "remote_opf_http",
+      "span_count": 1,
+      "labels": {
+        "private_url": 1
+      },
+      "redacted_text": "Dashboard: <PRIVATE_URL>"
+    },
+    {
+      "case": "url",
+      "mode": "local_fallback_inprocess",
+      "span_count": 1,
+      "labels": {
+        "private_url": 1
+      },
+      "redacted_text": "Dashboard: <PRIVATE_URL>"
+    },
+    {
+      "case": "bare_domain",
+      "mode": "remote_opf_http",
+      "span_count": 1,
+      "labels": {
+        "private_url": 1
+      },
+      "redacted_text": "Customer portal lives at <PRIVATE_URL>"
+    },
+    {
+      "case": "bare_domain",
+      "mode": "local_fallback_inprocess",
+      "span_count": 1,
+      "labels": {
+        "private_url": 1
+      },
+      "redacted_text": "Customer portal lives at <PRIVATE_URL>"
+    },
+    {
+      "case": "secret",
+      "mode": "remote_opf_http",
+      "span_count": 1,
+      "labels": {
+        "secret": 1
+      },
+      "redacted_text": "OPENAI_API_KEY=<SECRET>"
+    },
+    {
+      "case": "secret",
+      "mode": "local_fallback_inprocess",
+      "span_count": 1,
+      "labels": {
+        "secret": 1
+      },
+      "redacted_text": "OPENAI_API_KEY=<SECRET>"
+    },
+    {
+      "case": "jwt",
+      "mode": "remote_opf_http",
+      "span_count": 1,
+      "labels": {
+        "secret": 1
+      },
+      "redacted_text": "Authorization: Bearer <SECRET>"
+    },
+    {
+      "case": "jwt",
+      "mode": "local_fallback_inprocess",
+      "span_count": 1,
+      "labels": {
+        "secret": 1
+      },
+      "redacted_text": "Authorization: Bearer <SECRET>"
+    },
+    {
+      "case": "private_key",
+      "mode": "remote_opf_http",
+      "span_count": 1,
+      "labels": {
+        "secret": 1
+      },
+      "redacted_text": "<SECRET>"
+    },
+    {
+      "case": "private_key",
+      "mode": "local_fallback_inprocess",
+      "span_count": 1,
+      "labels": {
+        "secret": 1
+      },
+      "redacted_text": "key = '''<SECRET>'''"
+    },
+    {
+      "case": "person_date",
+      "mode": "remote_opf_http",
+      "span_count": 2,
+      "labels": {
+        "private_date": 1,
+        "private_person": 1
+      },
+      "redacted_text": "<PRIVATE_PERSON> was born on <PRIVATE_DATE> in Berkeley."
+    },
+    {
+      "case": "person_date",
+      "mode": "local_fallback_inprocess",
+      "span_count": 0,
+      "labels": {},
+      "redacted_text": "Alice Smith was born on 1990-01-02 in Berkeley."
+    },
+    {
+      "case": "address",
+      "mode": "remote_opf_http",
+      "span_count": 1,
+      "labels": {
+        "private_address": 1
+      },
+      "redacted_text": "Ship it to <PRIVATE_ADDRESS>."
+    },
+    {
+      "case": "address",
+      "mode": "local_fallback_inprocess",
+      "span_count": 0,
+      "labels": {},
+      "redacted_text": "Ship it to 123 Main St, Springfield, IL 62704."
+    },
+    {
+      "case": "clean",
+      "mode": "remote_opf_http",
+      "span_count": 0,
+      "labels": {},
+      "redacted_text": "Refactor parser and update README examples."
+    },
+    {
+      "case": "clean",
+      "mode": "local_fallback_inprocess",
+      "span_count": 0,
+      "labels": {},
+      "redacted_text": "Refactor parser and update README examples."
+    }
+  ]
+}
