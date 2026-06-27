@@ -243,7 +243,7 @@ curl -fsS http://<SERVICE_HOST>:<PORT>/health | jq .
 
 ### 步骤 4：配置 Hook 连接地址
 
-如果 OPF 服务不在默认地址 `http://127.0.0.1:8765`：
+如果 OPF 服务不在默认地址 `http://192.168.88.75:8765`：
 
 **方式 A：环境变量（推荐）**
 
@@ -255,7 +255,7 @@ export PRIVACY_FILTER_URL="http://<SERVICE_HOST>:<PORT>"
 
 **方式 B：全局 git config**
 
-hooks 通过 `_lib.sh` 的 `pf_url()` 读取环境变量 `PRIVACY_FILTER_URL`，默认值为 `http://127.0.0.1:8765`。
+hooks 通过 `_lib.sh` 的 `pf_url()` 读取环境变量 `PRIVACY_FILTER_URL`，默认值为 `http://192.168.88.75:8765`（远程 GPU 主机）。
 
 **方式 C：修改 config.toml**
 
@@ -299,6 +299,62 @@ export PRIVACY_FILTER_TIMEOUT_S=15    # 默认 5s，远程建议 10-30s
 
 ---
 
+## 本地规则 fallback 服务（推荐搭配远程 OPF）
+
+当主 OPF 服务部署在远程 GPU 主机时，开发机本地可启动一个轻量 **规则 fallback
+服务**，在远程 OPF 不可达（网络中断、主机宕机）时继续扫描提交，而不是直接 fail-open。
+
+hook 通过 `_lib.sh` 的 `pf_active_backend()` 先探测主 OPF 的 `/health`；2 秒内
+无响应则改用本地 fallback。两者都不可达才警告并放行（fail-open）。
+
+### 启动 fallback
+
+```bash
+cd ~/project/docker/privacy-filter-service
+PYTHONPATH=src .venv/bin/privacy-filter-fallback-service
+# 或：PYTHONPATH=src .venv/bin/python -m privacy_filter_service.fallback_app
+```
+
+默认监听 `127.0.0.1:8766`，**不需要 GPU 或 OPF 模型**，只读取 `config.toml`
+的 `[fallback]` 段（因此不需要 `model_path`）。
+
+### 覆盖范围
+
+fallback 只覆盖高置信规则：email、phone、URL/domain、JWT、private key、常见
+secret（`sk-*` 等）。**不覆盖** person / date / address / account_number —— 这些
+仍依赖 OPF 模型。返回结果带 `warning` 字段，说明是规则 fallback 而非模型结果。
+
+### 配置 fallback 地址（可选）
+
+默认值开箱即用。如需改端口，用环境变量或 `config.toml`：
+
+```bash
+export PRIVACY_FILTER_FALLBACK_HOST=127.0.0.1
+export PRIVACY_FILTER_FALLBACK_PORT=8766
+export PRIVACY_FILTER_FALLBACK_URL=http://127.0.0.1:8766
+```
+
+```toml
+[fallback]
+host = "127.0.0.1"
+port = 8766
+base_url = "http://127.0.0.1:8766"
+```
+
+### 验证
+
+```bash
+curl -fsS http://127.0.0.1:8766/health     # {"ready": true, "device": "local-rules", ...}
+bash tests/e2e/remote_fallback.sh          # 远程 OPF 主 + 本地 fallback 端到端
+```
+
+> fallback 没有 systemd unit；如需常驻，用 tmux / 终端，或自建 user unit。
+> 首次运行需先安装 Python 依赖：`uv venv .venv --python 3.10 && uv sync`
+> （远程 GPU 主机已有完整环境；纯本地 fallback 主机也要装 `presidio-analyzer`、
+> `detect-secrets`、`fastapi`、`uvicorn` 等）。
+
+---
+
 ## 配置速查
 
 ### 服务配置（`~/.config/privacy-filter/config.toml`）
@@ -312,9 +368,12 @@ export PRIVACY_FILTER_TIMEOUT_S=15    # 默认 5s，远程建议 10-30s
 | `service.output_mode` | `typed` | 输出模式 | `PRIVACY_FILTER_OUTPUT_MODE` |
 | `service.decode_mode` | `viterbi` | 解码模式 | `PRIVACY_FILTER_DECODE_MODE` |
 | `service.log_level` | `INFO` | 日志级别 | `PRIVACY_FILTER_LOG_LEVEL` |
-| `hook.base_url` | `http://127.0.0.1:8765` | Hook 调用的服务地址 | `PRIVACY_FILTER_URL` |
+| `hook.base_url` | `http://192.168.88.75:8765` | Hook 调用的主 OPF 服务地址 | `PRIVACY_FILTER_URL` |
 | `hook.request_timeout_s` | `5.0` | HTTP 超时(秒) | `PRIVACY_FILTER_TIMEOUT_S` |
 | `hook.max_file_bytes` | `262144` | 最大文件大小(≤1MB) | `PRIVACY_FILTER_MAX_FILE_BYTES` |
+| `fallback.host` | `127.0.0.1` | 本地规则 fallback 监听地址 | `PRIVACY_FILTER_FALLBACK_HOST` |
+| `fallback.port` | `8766` | 本地规则 fallback 监听端口 | `PRIVACY_FILTER_FALLBACK_PORT` |
+| `fallback.base_url` | `http://127.0.0.1:8766` | 主 OPF 不可用时调用的 fallback 地址 | `PRIVACY_FILTER_FALLBACK_URL` |
 
 ### 配置加载优先级
 
@@ -460,12 +519,14 @@ bash install/uninstall.sh
 
 部署完成后，逐项确认：
 
-- [ ] 服务健康检查通过：`curl -fsS http://127.0.0.1:8765/health` → `{"ready": true}`
+- [ ] 服务健康检查通过：`curl -fsS "${PRIVACY_FILTER_URL:-http://192.168.88.75:8765}/health"` → `{"ready": true}`
 - [ ] Hooks 已安装：对应目录下存在 `pre-commit`、`commit-msg`、`_lib.sh`
 - [ ] （全局模式）`git config --global core.hooksPath` 输出正确路径
 - [ ] PII 检测功能正常：包含 PII 的提交被拦截
 - [ ] commit-msg hook 正常：提交信息中的 PII 被自动脱敏
-- [ ] Fail-open 正常：服务停止时，`git commit` 不被阻塞（仅警告）
+- [ ] Fail-open 正常：主服务和 fallback 都不可达时，`git commit` 不被阻塞（仅警告）
+- [ ] （远程 OPF）本地 fallback 已启动：`curl -fsS "${PRIVACY_FILTER_FALLBACK_URL:-http://127.0.0.1:8766}/health"` → `{"ready": true, "device": "local-rules"}`
+- [ ] （远程 OPF）Failover 正常：远程不可达时 hook 自动改用本地 fallback，stderr 提示 `local fallback used`
 - [ ] Skip 机制正常：`PRIVACY_FILTER_SKIP=1 git commit` 可正常提交
 - [ ] （远程服务）`PRIVACY_FILTER_URL` 已正确配置
 - [ ] （远程服务）超时已根据网络延迟调整
