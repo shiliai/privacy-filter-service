@@ -5,7 +5,7 @@ umask 077
 
 source "$(dirname "$0")/_lib.sh"
 
-trap 'pf_cleanup_old_patches' EXIT
+trap 'pf_cleanup_old_patches; rm -f "${label_counts_file:-}"' EXIT
 
 if pf_skip_active; then
   exit 0
@@ -22,7 +22,11 @@ if ! printf '%s' "$health_response" | python3 -c 'import json, sys; data = json.
   exit 0
 fi
 
-mapfile -t staged_paths < <(git diff --cached --name-only --diff-filter=ACM)
+# bash 3.2 (macOS) lacks `mapfile`; read into an indexed array portably.
+staged_paths=()
+while IFS= read -r staged_line; do
+  staged_paths+=("$staged_line")
+done < <(git diff --cached --name-only --diff-filter=ACM)
 
 if [ "${#staged_paths[@]}" -eq 0 ]; then
   exit 0
@@ -42,7 +46,10 @@ redacted_root="$privacy_dir/redacted"
 mkdir -p "$orig_root" "$redacted_root"
 
 declare -a pii_paths=()
-declare -A label_counts=()
+# bash 3.2 (macOS) lacks associative arrays; accumulate label counts in a temp
+# file and aggregate with awk at the end.
+label_counts_file="$privacy_dir/label-counts-$$.txt"
+: > "$label_counts_file"
 total_spans=0
 
 for path in "${staged_paths[@]}"; do
@@ -96,7 +103,7 @@ for path in "${staged_paths[@]}"; do
   fi
   while IFS=$'\t' read -r label count; do
     [ -n "$label" ] || continue
-    label_counts["$label"]=$(( ${label_counts["$label"]:-0} + count ))
+    printf '%s\t%s\n' "$label" "$count" >> "$label_counts_file"
   done < <(printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); by_label = data.get("summary", {}).get("by_label", {});
 for key, value in by_label.items():
     print(f"{key}\t{value}")')
@@ -123,12 +130,9 @@ if ! git apply --check "$patch_file" >/dev/null 2>&1; then
 fi
 
 printf '[privacy-filter] blocked commit: detected PII in %s staged file(s), %s span(s)\n' "${#pii_paths[@]}" "$total_spans" >&2
-if [ "${#label_counts[@]}" -gt 0 ]; then
-  printf '[privacy-filter] by label:' >&2
-  for label in "${!label_counts[@]}"; do
-    printf ' %s=%s' "$label" "${label_counts[$label]}" >&2
-  done
-  printf '\n' >&2
+by_label_summary="$(awk -F'\t' '{counts[$1]+=$2} END {for (label in counts) printf " %s=%s", label, counts[label]}' "$label_counts_file")"
+if [ -n "$by_label_summary" ]; then
+  printf '[privacy-filter] by label:%s\n' "$by_label_summary" >&2
 fi
 printf '[privacy-filter] review patch: %s\n' "$patch_file" >&2
 printf '[privacy-filter] apply with: git apply --index "%s"\n' "$patch_file" >&2

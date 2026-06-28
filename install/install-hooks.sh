@@ -96,7 +96,8 @@ detect_hook_managers() {
 
   local found=0
   local marker
-  while IFS= read -r -d '' marker; do
+  while IFS= read -r marker; do
+    [ -n "$marker" ] || continue
     warn "Hook manager artifact found: $marker"
     found=1
   done < <(
@@ -104,7 +105,7 @@ detect_hook_managers() {
       \( -name '.husky' -type d \
       -o -name '.pre-commit-config.yaml' \
       -o -name 'lefthook.yml' \) \
-      -print0 2>/dev/null | head -z -n 20
+      2>/dev/null | head -n 20
   ) || true
 
   if [ "$found" = "1" ]; then
