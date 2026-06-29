@@ -431,7 +431,7 @@ PRIVACY_FILTER_URL="http://127.0.0.1:1" git commit -m "test"
 
 | 环境变量 | 默认 | 说明 |
 |----------|------|------|
-| `PRIVACY_FILTER_URL` | *(空)* | 主引擎服务地址（Track 1 的 URL）。**空 = 不走主引擎**，直接用本地非模型兜底。 |
+| `PRIVACY_FILTER_URL` | *(空)* | 主引擎服务地址（Track 1 的 URL）。env 为空时回退到 `git config privacyfilter.url`；**两者都为空才不走主引擎**，直接用本地非模型兜底。 |
 | `PRIVACY_FILTER_TIMEOUT_S` | `5` | 主引擎 HTTP 超时（秒）。远程建议 10-30。 |
 | `PRIVACY_FILTER_MAX_FILE_BYTES` | `262144` | 单文件最大字节数（≤1MB）。 |
 | `PRIVACY_FILTER_SKIP` | `0` | `1` = 完全跳过 privacy-filter hook（单次绕过）。 |
