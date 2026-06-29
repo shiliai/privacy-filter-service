@@ -19,6 +19,7 @@ tests=(
   test_malformed_response.sh
   test_fallback_redact.sh
   test_fallback_patterns.sh
+  test_git_config_url.sh
   test_fail_closed.sh
   test_skip_env.sh
   test_no_verify.sh
