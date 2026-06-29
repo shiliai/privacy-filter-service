@@ -15,6 +15,8 @@ tests=(
   test_commit_msg_clean.sh
   test_commit_msg_comment.sh
   test_service_down.sh
+  test_fallback_redact.sh
+  test_fail_closed.sh
   test_skip_env.sh
   test_no_verify.sh
   test_concurrent.sh
@@ -52,11 +54,13 @@ done
 
 printf '\nSummary\n'
 printf 'PASS %s\n' "${#passed[@]}"
-for test_name in "${passed[@]}"; do
+# ${arr[@]+"${arr[@]}"} is the set -u safe idiom for a possibly-empty array
+# (bash 3.2 errors on "${arr[@]}" when the array is empty).
+for test_name in ${passed[@]+"${passed[@]}"}; do
   printf '  PASS %s\n' "$test_name"
 done
 printf 'FAIL %s\n' "${#failed[@]}"
-for test_name in "${failed[@]}"; do
+for test_name in ${failed[@]+"${failed[@]}"}; do
   printf '  FAIL %s\n' "$test_name"
 done
 

@@ -311,17 +311,33 @@ test_5_skip_bypass() {
   fi
 }
 
-test_6_fail_open() {
-  info "Test 6: service down → fail-open…"
+test_6_service_down() {
+  info "Test 6: service down → local fallback blocks PII…"
   cd "$TEST_REPO"
   systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
   sleep 1
-  echo "charlie@example.com more secrets" > failopen.txt
-  git add failopen.txt
-  if git commit -m "fail-open test" 2>&1; then
-    pass 6 "fail-open: commit succeeded with service down"
+  echo "charlie@example.com more secrets" > fallback.txt
+  git add fallback.txt
+  # Service is down, but the bundled local non-model fallback must still catch
+  # the PII — no silent fail-open leak.
+  if git commit -m "fallback test" >/dev/null 2>&1; then
+    fail 6 "fallback: commit should be blocked when service is down"
   else
-    fail 6 "fail-open: commit should succeed when service is down"
+    pass 6 "fallback: PII blocked by local fallback with service down"
+  fi
+
+  info "Test 6b: fail-open escape hatch (FAIL_OPEN=1, no fallback)…"
+  # Opt out of the fallback and into fail-open: the commit must succeed and
+  # the PII must be preserved unredacted.
+  if PRIVACY_FILTER_NO_FALLBACK=1 PRIVACY_FILTER_FAIL_OPEN=1 git commit -m "failopen test" >/dev/null 2>&1; then
+    pass 6 "fail-open: commit succeeded with FAIL_OPEN=1"
+    if git show HEAD:fallback.txt 2>/dev/null | grep -q "charlie@example.com"; then
+      pass 6 "fail-open: PII preserved unredacted"
+    else
+      fail 6 "fail-open: PII unexpectedly redacted"
+    fi
+  else
+    fail 6 "fail-open: commit should succeed with FAIL_OPEN=1"
   fi
 }
 
@@ -369,7 +385,7 @@ main() {
   test_3_apply_patch_and_commit
   test_4_commit_msg_redaction
   test_5_skip_bypass
-  test_6_fail_open
+  test_6_service_down
   test_7_no_journal_leak
 
   # ---- Uninstall & verify ----

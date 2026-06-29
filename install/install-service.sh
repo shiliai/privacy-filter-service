@@ -123,9 +123,50 @@ PY
 
 # ---------------------------------------------------------------------------
 # 1. Validate prerequisites
+#
+# This installer deploys the Track 1 SERVER-SIDE GPU model service: Linux +
+# systemd + an NVIDIA GPU. macOS and GPU-less hosts are intentionally not
+# supported here — on those, use a remote service (Track 1a) together with the
+# local hook install (Track 2), whose bundled CPU non-model fallback runs
+# without a GPU or model.
 # ---------------------------------------------------------------------------
+check_platform() {
+  local os
+  os="$(uname -s)"
+  if [ "$os" != "Linux" ]; then
+    error "The server-side GPU model service is Linux-only (systemd + NVIDIA GPU)."
+    error "You are on: $os"
+    error ""
+    error "To redact on this machine instead:"
+    error "  Track 1a — use an existing remote OPF service (set PRIVACY_FILTER_URL), and"
+    error "  Track 2  — run install/install-hooks.sh (bundles a local CPU non-model fallback)."
+    exit 1
+  fi
+}
+
+check_gpu() {
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+    info "NVIDIA GPU detected ($(nvidia-smi -L | head -n 1 | cut -c1-60))"
+    return 0
+  fi
+  local venv_python="$PROJECT_ROOT/.venv/bin/python3"
+  if [ -x "$venv_python" ] && "$venv_python" -c 'import torch; raise SystemExit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+    info "CUDA available (torch.cuda.is_available())"
+    return 0
+  fi
+  error "No NVIDIA GPU / CUDA detected. The server-side model service needs a GPU."
+  error ""
+  error "Options:"
+  error "  - Install on a host with an NVIDIA GPU + CUDA, or"
+  error "  - Track 1a — use a remote OPF service (PRIVACY_FILTER_URL), and"
+  error "  - Track 2  — run install/install-hooks.sh (its local CPU non-model fallback needs no GPU)."
+  exit 1
+}
+
 check_prereqs() {
   command -v uv >/dev/null 2>&1   || die "uv is not installed. Install from https://docs.astral.sh/uv/"
+  check_platform
+  check_gpu
   systemctl --version >/dev/null 2>&1 || die "systemctl --user is not available (no user session?)"
 
   MODEL_PATH="$(resolve_model_path)" || die "Model directory not found. Set service.model_path in $CONFIG_DIR/config.toml, PRIVACY_FILTER_MODEL_PATH, or OPF_CHECKPOINT."

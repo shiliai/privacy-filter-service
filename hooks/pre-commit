@@ -11,18 +11,26 @@ if pf_skip_active; then
   exit 0
 fi
 
-health_response=""
-if ! health_response="$(curl -fsS -m 2 "$(pf_url)/health" 2>/dev/null)"; then
-  pf_warn_once unavailable "service down, fail-open"
-  exit 0
+# Choose engine once for the whole commit: primary model service if configured
+# and healthy, else the local non-model fallback, else none. "none" is the only
+# path that can let a commit through unredacted — and only when FAIL_OPEN=1.
+engine="$(pf_select_engine)"
+if [ "$engine" = "fallback" ] && pf_primary_configured; then
+  pf_warn_once fallback "primary service unreachable, using local non-model fallback"
+elif [ "$engine" = "none" ]; then
+  if pf_fail_open_enabled; then
+    pf_warn_once unavailable "no redaction engine available, fail-open"
+    exit 0
+  fi
+  printf '[privacy-filter] no redaction engine available (primary down, local fallback disabled). Set PRIVACY_FILTER_FAIL_OPEN=1 to allow unredacted commits, or PRIVACY_FILTER_SKIP=1 to bypass.\n' >&2
+  exit 1
 fi
 
-if ! printf '%s' "$health_response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") else 1)'; then
-  pf_warn_once unavailable "service down, fail-open"
-  exit 0
-fi
-
-mapfile -t staged_paths < <(git diff --cached --name-only --diff-filter=ACM)
+# bash 3.2 has no mapfile; read into an indexed array instead.
+staged_paths=()
+while IFS= read -r _staged; do
+  staged_paths+=("$_staged")
+done < <(git diff --cached --name-only --diff-filter=ACM)
 
 if [ "${#staged_paths[@]}" -eq 0 ]; then
   exit 0
@@ -41,8 +49,9 @@ orig_root="$privacy_dir/orig"
 redacted_root="$privacy_dir/redacted"
 mkdir -p "$orig_root" "$redacted_root"
 
+# Indexed arrays only (bash 3.2 has no associative arrays / declare -A).
 declare -a pii_paths=()
-declare -A label_counts=()
+declare -a by_label_lines=()
 total_spans=0
 
 for path in "${staged_paths[@]}"; do
@@ -67,17 +76,13 @@ for path in "${staged_paths[@]}"; do
     continue
   fi
 
-  http_meta_file="$privacy_dir/http-$$.meta"
-  if ! response="$(python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))' < "$orig_file" | pf_post_json /redact 2> "$http_meta_file")"; then
-    pf_warn_once unavailable "redaction request failed, fail-open"
-    exit 0
-  fi
-
-  http_code="$(python3 -c 'import sys; data = sys.stdin.read().splitlines(); print(data[-1].split(":", 1)[1] if data else "0")' < "$http_meta_file")"
-  rm -f "$http_meta_file"
-  if [ "$http_code" != "200" ]; then
-    pf_warn_once unavailable "service unavailable, fail-open"
-    exit 0
+  if ! response="$(pf_redact "$engine" < "$orig_file")"; then
+    if pf_fail_open_enabled; then
+      pf_warn_once unavailable "redaction unavailable, fail-open"
+      exit 0
+    fi
+    printf '[privacy-filter] redaction unavailable for %s. Set PRIVACY_FILTER_FAIL_OPEN=1 to allow unredacted commits, or PRIVACY_FILTER_SKIP=1 to bypass.\n' "$path" >&2
+    exit 1
   fi
 
   if ! span_count="$(printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(int(data.get("summary", {}).get("span_count", 0)))')"; then
@@ -96,7 +101,7 @@ for path in "${staged_paths[@]}"; do
   fi
   while IFS=$'\t' read -r label count; do
     [ -n "$label" ] || continue
-    label_counts["$label"]=$(( ${label_counts["$label"]:-0} + count ))
+    by_label_lines+=("${label}"$'\t'"${count}")
   done < <(printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); by_label = data.get("summary", {}).get("by_label", {});
 for key, value in by_label.items():
     print(f"{key}\t{value}")')
@@ -123,11 +128,22 @@ if ! git apply --check "$patch_file" >/dev/null 2>&1; then
 fi
 
 printf '[privacy-filter] blocked commit: detected PII in %s staged file(s), %s span(s)\n' "${#pii_paths[@]}" "$total_spans" >&2
-if [ "${#label_counts[@]}" -gt 0 ]; then
+if [ "${#by_label_lines[@]}" -gt 0 ]; then
   printf '[privacy-filter] by label:' >&2
-  for label in "${!label_counts[@]}"; do
-    printf ' %s=%s' "$label" "${label_counts[$label]}" >&2
-  done
+  printf '%s\n' "${by_label_lines[@]}" | python3 -c '
+import sys
+from collections import Counter
+counts = Counter()
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if not line:
+        continue
+    label, _, count = line.partition("\t")
+    if count.lstrip("-").isdigit():
+        counts[label] += int(count)
+for label in sorted(counts):
+    print(f" {label}={counts[label]}", end="")
+' >&2
   printf '\n' >&2
 fi
 printf '[privacy-filter] review patch: %s\n' "$patch_file" >&2

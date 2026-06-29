@@ -85,7 +85,8 @@ pfit_make_repo() {
   cp "$HOOKS_DIR/pre-commit" "$repo/.git/hooks/pre-commit"
   cp "$HOOKS_DIR/commit-msg" "$repo/.git/hooks/commit-msg"
   cp "$HOOKS_DIR/_lib.sh" "$repo/.git/hooks/_lib.sh"
-  chmod +x "$repo/.git/hooks/pre-commit" "$repo/.git/hooks/commit-msg" "$repo/.git/hooks/_lib.sh"
+  cp "$HOOKS_DIR/pf_fallback.py" "$repo/.git/hooks/pf_fallback.py"
+  chmod +x "$repo/.git/hooks/pre-commit" "$repo/.git/hooks/commit-msg" "$repo/.git/hooks/_lib.sh" "$repo/.git/hooks/pf_fallback.py"
   printf '%s\n' "$repo"
 }
 
