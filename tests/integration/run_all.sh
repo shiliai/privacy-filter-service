@@ -14,8 +14,11 @@ tests=(
   test_commit_msg_redact.sh
   test_commit_msg_clean.sh
   test_commit_msg_comment.sh
+  test_commit_msg_empty_redact.sh
   test_service_down.sh
+  test_malformed_response.sh
   test_fallback_redact.sh
+  test_fallback_patterns.sh
   test_fail_closed.sh
   test_skip_env.sh
   test_no_verify.sh

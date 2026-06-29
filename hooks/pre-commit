@@ -66,8 +66,7 @@ for path in "${staged_paths[@]}"; do
   orig_file="$orig_root/$path"
   mkdir -p "$(dirname "$orig_file")"
   if ! git show ":$path" > "$orig_file"; then
-    pf_warn_once unavailable "failed to read staged content, fail-open"
-    exit 0
+    pf_exit_fail_open_or_block "failed to read staged content for $path"
   fi
 
   bytes="$(wc -c < "$orig_file" | tr -d '[:space:]')"
@@ -86,8 +85,7 @@ for path in "${staged_paths[@]}"; do
   fi
 
   if ! span_count="$(printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); print(int(data.get("summary", {}).get("span_count", 0)))')"; then
-    pf_warn_once unavailable "invalid service response, fail-open"
-    exit 0
+    pf_exit_fail_open_or_block "invalid redaction response for $path"
   fi
   if [ "$span_count" = "0" ]; then
     continue
@@ -96,8 +94,7 @@ for path in "${staged_paths[@]}"; do
   redacted_file="$redacted_root/$path"
   mkdir -p "$(dirname "$redacted_file")"
   if ! printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); sys.stdout.write(data["redacted_text"])' > "$redacted_file"; then
-    pf_warn_once unavailable "invalid service response, fail-open"
-    exit 0
+    pf_exit_fail_open_or_block "invalid redaction response for $path"
   fi
   while IFS=$'\t' read -r label count; do
     [ -n "$label" ] || continue
@@ -123,8 +120,7 @@ chmod 600 "$patch_file"
 
 if ! git apply --check "$patch_file" >/dev/null 2>&1; then
   rm -f "$patch_file"
-  pf_warn_once unavailable "generated patch invalid, fail-open"
-  exit 0
+  pf_exit_fail_open_or_block "generated redaction patch is invalid"
 fi
 
 printf '[privacy-filter] blocked commit: detected PII in %s staged file(s), %s span(s)\n' "${#pii_paths[@]}" "$total_spans" >&2

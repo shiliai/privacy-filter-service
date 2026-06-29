@@ -93,8 +93,22 @@ if ! json_result="$(pf_redact "$engine" < "$protected_file")"; then
 fi
 
 if ! printf '%s' "$json_result" | python3 -c 'import json, sys; sys.stdout.write(json.load(sys.stdin).get("redacted_text", ""))' > "$redacted_file" 2>/dev/null; then
-  pf_warn_once redact-error "commit-msg redaction failed, message unchanged"
-  exit 0
+  pf_exit_fail_open_or_block "commit-message redaction response was invalid"
+fi
+
+# Defense against a misbehaving primary that reports PII (span_count > 0) but
+# returns an empty or unchanged redacted_text: that is a failed redaction, not
+# a clean message — never silently blank the message or pass it through. Mirrors
+# pre-commit's distrust of an engine that claims PII but produces no redaction.
+if ! printf '%s' "$json_result" | python3 -c 'import json, sys
+result = json.load(sys.stdin)
+protected = open(sys.argv[1]).read()
+span = int(result.get("summary", {}).get("span_count", 0))
+redacted = result.get("redacted_text", "")
+if span > 0 and (redacted == "" or redacted == protected):
+    raise SystemExit(1)
+' "$protected_file" 2>/dev/null; then
+  pf_exit_fail_open_or_block "commit-message redaction reported PII but produced no usable redaction"
 fi
 
 python3 - "$meta_file" "$redacted_file" "$final_file" <<'PY'

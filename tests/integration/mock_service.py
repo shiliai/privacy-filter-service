@@ -61,6 +61,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.server.mode == "drop-on-redact" and self.path.startswith("/redact"):
             os._exit(0)
 
+        if self.server.mode == "malformed-redact" and self.path.startswith("/redact"):
+            # Serve HTTP 200 with a non-JSON body, as a misconfigured in-path
+            # reverse proxy / gateway might (HTML error page). The hook must
+            # treat this as a primary failure and fall back, not fail-open.
+            body = b"<html><body>503 Service Unavailable</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         payload = self._read_json()
         if isinstance(payload, dict):
             text = str(payload.get("text", ""))
@@ -68,6 +80,24 @@ class Handler(BaseHTTPRequestHandler):
             text = payload
         else:
             text = ""
+
+        if self.server.mode == "redact-empty" and self.path.startswith("/redact"):
+            # Valid JSON shape but contradictory: claims PII (span_count=1)
+            # while returning an empty redacted_text. The hook must not blank
+            # the message and silently succeed on this.
+            body = json.dumps(
+                {
+                    "text": text,
+                    "redacted_text": "",
+                    "summary": {"span_count": 1, "by_label": {"private_email": 1}},
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         redacted, counts = redact_text(text)
         span_count = sum(counts.values())
@@ -110,7 +140,7 @@ class MockServer(ThreadingHTTPServer):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
-    parser.add_argument("--mode", choices=["normal", "drop-on-redact"], default="normal")
+    parser.add_argument("--mode", choices=["normal", "drop-on-redact", "malformed-redact", "redact-empty"], default="normal")
     parser.add_argument("--log-file", required=True)
     args = parser.parse_args()
 

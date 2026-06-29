@@ -72,21 +72,44 @@ _pf_fallback_redact() {
   printf '%s' "$payload" | python3 "$(pf_fallback_path)" 2>/dev/null
 }
 
+# Validate that a candidate redaction-result JSON has the shape the hooks parse
+# (redacted_text + summary.span_count). Guards against a primary that returns
+# HTTP 200 with a non-JSON body (e.g. an in-path reverse proxy serving an HTML
+# error page): such a response must be treated as a primary failure so the local
+# fallback is consulted rather than silently fail-opening.
+_pf_result_valid() {
+  python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+if not isinstance(d, dict):
+    raise SystemExit(1)
+if not isinstance(d.get("redacted_text"), str):
+    raise SystemExit(1)
+s = d.get("summary")
+if not isinstance(s, dict) or not isinstance(s.get("span_count"), int):
+    raise SystemExit(1)
+' 2>/dev/null
+}
+
 # pf_redact <engine>: read raw text from stdin, print a redaction result JSON
 # on stdout (same shape as POST /redact), return 0 on success / 1 if no engine
 # could produce a result. When the selected primary fails mid-request (e.g. the
-# service drops the connection), it transparently falls back to the local
-# non-model detector.
+# service drops the connection) OR returns a malformed/unusable 200 response,
+# it transparently falls back to the local non-model detector.
 pf_redact() {
-  local engine payload
+  local engine payload body
   engine="$1"
   payload="$(python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))')" || return 1
   if [ "$engine" = "primary" ]; then
-    if _pf_post_redact "$payload"; then
+    if body="$(_pf_post_redact "$payload")" && printf '%s' "$body" | _pf_result_valid; then
+      printf '%s' "$body"
       return 0
     fi
-    # Primary failed mid-request (e.g. service dropped the connection): fall
-    # back to the local non-model detector if it is available.
+    # Primary failed or returned a malformed/unusable response (e.g. a proxy
+    # serving an HTML error page with HTTP 200): fall back to the local
+    # non-model detector if it is available.
     if pf_fallback_enabled && _pf_fallback_redact "$payload"; then
       return 0
     fi
@@ -137,6 +160,21 @@ pf_warn_once() {
 pf_fail_open() {
   pf_warn_once unavailable "$1"
   exit 0
+}
+
+# Default fail-closed exit for every recoverable-but-unverified state (read
+# failure, malformed response, unappliable patch): block the commit unless
+# PRIVACY_FILTER_FAIL_OPEN=1 explicitly opts back into fail-open. Keeps every
+# exit-0 path consistent with the pf_select_engine / pf_redact contract so PII
+# never slips through silently by default.
+pf_exit_fail_open_or_block() {
+  local reason="$1"
+  if pf_fail_open_enabled; then
+    pf_warn_once unavailable "$reason, fail-open"
+    exit 0
+  fi
+  printf '[privacy-filter] %s. Set PRIVACY_FILTER_FAIL_OPEN=1 to allow unredacted commits, or PRIVACY_FILTER_SKIP=1 to bypass.\n' "$reason" >&2
+  exit 1
 }
 
 pf_is_lfs_pointer() {

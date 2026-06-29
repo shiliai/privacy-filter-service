@@ -58,6 +58,8 @@ _LABEL_RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b"), "secret"),           # GitHub token
     (re.compile(r"\bglpat-[A-Za-z0-9_\-]{20,}\b"), "secret"),            # GitLab token
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9\-]{10,}\b"), "secret"),        # Slack token
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "secret"),                # Google API key
+    (re.compile(r"\b(?:sk_live_|sk_test_|rk_live_)[0-9A-Za-z]{24,}\b"), "secret"),  # Stripe key
     (re.compile(r"\bBearer\s+[A-Za-z0-9_\-.=]{20,}\b"), "secret"),
     # --- secrets: key = "value" assignments -----------------------------
     (re.compile(
@@ -102,6 +104,10 @@ def redact(text: str) -> tuple[str, Counter]:
         digits = re.sub(r"\D", "", match.group(0))
         if len(digits) < 13 or len(digits) > 19 or not _luhn_ok(digits):
             return match.group(0)
+        # All-same-digit runs (e.g. 0000…/4444…) are never real cards; skip
+        # them to avoid corrupting digit runs in data, timestamps or order ids.
+        if len(set(digits)) == 1:
+            return match.group(0)
         counts["account_number"] += 1
         return _placeholder("account_number")
 
@@ -116,7 +122,8 @@ def _read_text() -> str:
     except (json.JSONDecodeError, ValueError):
         return raw
     if isinstance(data, dict):
-        return str(data.get("text", ""))
+        value = data.get("text", "")
+        return value if isinstance(value, str) else ""
     if isinstance(data, str):
         return data
     return raw
