@@ -1,19 +1,126 @@
 #!/usr/bin/env bash
 
 pf_url() {
-  printf '%s' "${PRIVACY_FILTER_URL:-http://127.0.0.1:8765}"
+  # Empty when no primary is configured (PRIVACY_FILTER_URL unset) — in that
+  # case the hook skips the primary and goes straight to the local fallback.
+  printf '%s' "${PRIVACY_FILTER_URL:-}"
 }
 
 pf_skip_active() {
   [ "${PRIVACY_FILTER_SKIP:-0}" = "1" ]
 }
 
+pf_primary_configured() {
+  [ -n "$(pf_url)" ]
+}
+
+# Local non-model fallback lives next to this library (hooks/pf_fallback.py).
+pf_fallback_path() {
+  printf '%s/pf_fallback.py' "$(dirname "${BASH_SOURCE[0]:-$0}")"
+}
+
+pf_fallback_enabled() {
+  [ "${PRIVACY_FILTER_NO_FALLBACK:-0}" != "1" ] && [ -f "$(pf_fallback_path)" ]
+}
+
+# Fail-open (allow unredacted commit) only when explicitly opted in; the
+# default is fail-closed so PII never slips through silently.
+pf_fail_open_enabled() {
+  [ "${PRIVACY_FILTER_FAIL_OPEN:-0}" = "1" ]
+}
+
 _pf_service_ready() {
   local response
+  pf_primary_configured || return 1
   if ! response="$(curl -fsS -m 2 "$(pf_url)/health" 2>/dev/null)"; then
     return 1
   fi
   printf '%s' "$response" | python3 -c 'import json, sys; data = json.load(sys.stdin); raise SystemExit(0 if data.get("ready") is True else 1)'
+}
+
+# Choose the redaction engine to use for this commit. Call once, then pass the
+# result to pf_redact for every file. Prints: primary | fallback | none.
+pf_select_engine() {
+  if pf_primary_configured && _pf_service_ready; then
+    printf 'primary\n'
+  elif pf_fallback_enabled; then
+    printf 'fallback\n'
+  else
+    printf 'none\n'
+  fi
+}
+
+# POST a {"text": ...} JSON payload to the primary /redact endpoint; print the
+# response body on stdout (exit 0) only on HTTP 200, else exit non-zero.
+_pf_post_redact() {
+  local payload url timeout response http_code
+  payload="$1"
+  pf_primary_configured || return 1
+  url="$(pf_url)/redact"
+  timeout="${PRIVACY_FILTER_TIMEOUT_S:-5}"
+  response="$(printf '%s' "$payload" | curl -fsS --max-time "$timeout" -X POST \
+    -H 'Content-Type: application/json' --data-binary @- \
+    --write-out $'\n%{http_code}' "$url" 2>/dev/null)" || return 1
+  http_code="${response##*$'\n'}"
+  [ "$http_code" = "200" ] || return 1
+  printf '%s' "${response%$'\n'*}"
+}
+
+# Run the local non-model fallback on a JSON payload; print result JSON.
+_pf_fallback_redact() {
+  local payload="$1"
+  printf '%s' "$payload" | python3 "$(pf_fallback_path)" 2>/dev/null
+}
+
+# Validate that a candidate redaction-result JSON has the shape the hooks parse
+# (redacted_text + summary.span_count). Guards against a primary that returns
+# HTTP 200 with a non-JSON body (e.g. an in-path reverse proxy serving an HTML
+# error page): such a response must be treated as a primary failure so the local
+# fallback is consulted rather than silently fail-opening.
+_pf_result_valid() {
+  python3 -c 'import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+if not isinstance(d, dict):
+    raise SystemExit(1)
+if not isinstance(d.get("redacted_text"), str):
+    raise SystemExit(1)
+s = d.get("summary")
+if not isinstance(s, dict) or not isinstance(s.get("span_count"), int):
+    raise SystemExit(1)
+' 2>/dev/null
+}
+
+# pf_redact <engine>: read raw text from stdin, print a redaction result JSON
+# on stdout (same shape as POST /redact), return 0 on success / 1 if no engine
+# could produce a result. When the selected primary fails mid-request (e.g. the
+# service drops the connection) OR returns a malformed/unusable 200 response,
+# it transparently falls back to the local non-model detector.
+pf_redact() {
+  local engine payload body
+  engine="$1"
+  payload="$(python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))')" || return 1
+  if [ "$engine" = "primary" ]; then
+    if body="$(_pf_post_redact "$payload")" && printf '%s' "$body" | _pf_result_valid; then
+      printf '%s' "$body"
+      return 0
+    fi
+    # Primary failed or returned a malformed/unusable response (e.g. a proxy
+    # serving an HTML error page with HTTP 200): fall back to the local
+    # non-model detector if it is available.
+    if pf_fallback_enabled && _pf_fallback_redact "$payload"; then
+      return 0
+    fi
+    return 1
+  elif [ "$engine" = "fallback" ]; then
+    if pf_fallback_enabled && _pf_fallback_redact "$payload"; then
+      return 0
+    fi
+    return 1
+  fi
+  return 1
 }
 
 pf_git_dir() {
@@ -53,6 +160,21 @@ pf_warn_once() {
 pf_fail_open() {
   pf_warn_once unavailable "$1"
   exit 0
+}
+
+# Default fail-closed exit for every recoverable-but-unverified state (read
+# failure, malformed response, unappliable patch): block the commit unless
+# PRIVACY_FILTER_FAIL_OPEN=1 explicitly opts back into fail-open. Keeps every
+# exit-0 path consistent with the pf_select_engine / pf_redact contract so PII
+# never slips through silently by default.
+pf_exit_fail_open_or_block() {
+  local reason="$1"
+  if pf_fail_open_enabled; then
+    pf_warn_once unavailable "$reason, fail-open"
+    exit 0
+  fi
+  printf '[privacy-filter] %s. Set PRIVACY_FILTER_FAIL_OPEN=1 to allow unredacted commits, or PRIVACY_FILTER_SKIP=1 to bypass.\n' "$reason" >&2
+  exit 1
 }
 
 pf_is_lfs_pointer() {
@@ -104,25 +226,6 @@ pf_is_text_file() {
     utf-8|us-ascii) return 0 ;;
     *) return 1 ;;
   esac
-}
-
-pf_post_json() {
-  local endpoint url timeout response curl_status body http_code
-  endpoint="$1"
-  url="$(pf_url)${endpoint}"
-  timeout="${PRIVACY_FILTER_TIMEOUT_S:-5}"
-
-  response="$(curl -sS --max-time "$timeout" -X POST -H 'Content-Type: application/json' --data-binary @- --write-out $'\nHTTP:%{http_code}' "$url")"
-  curl_status=$?
-  if [ "$curl_status" -ne 0 ]; then
-    printf 'HTTP:0\n' >&2
-    return "$curl_status"
-  fi
-
-  http_code="${response##*$'\n'}"
-  body="${response%$'\n'HTTP:*}"
-  printf '%s\n' "$http_code" >&2
-  printf '%s' "$body"
 }
 
 pf_cleanup_old_patches() {

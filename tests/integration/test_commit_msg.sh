@@ -53,6 +53,30 @@ pf_ensure_dir() {
     mkdir -p .git/privacy-filter
     chmod 700 .git/privacy-filter 2>/dev/null || true
 }
+
+# Failover interface expected by the current commit-msg (this stub ships no
+# pf_fallback.py, so there is no local fallback — "none" means fail-closed).
+pf_primary_configured() {
+    [ -n "${PRIVACY_FILTER_URL:-}" ]
+}
+pf_fallback_enabled() {
+    return 1
+}
+pf_fail_open_enabled() {
+    [ "${PRIVACY_FILTER_FAIL_OPEN:-0}" = "1" ]
+}
+pf_select_engine() {
+    if pf_primary_configured && _pf_service_ready; then
+        printf 'primary\n'
+    else
+        printf 'none\n'
+    fi
+}
+pf_redact() {
+    local payload
+    payload="$(python3 -c 'import json, sys; print(json.dumps({"text": sys.stdin.read()}))')" || return 1
+    printf '%s' "$payload" | pf_post_json /redact 2>/dev/null
+}
 STUB_EOF
 }
 
@@ -237,7 +261,7 @@ else
     assert_fail "Message unchanged when service down"
 fi
 
-if grep -qi 'unavailable\|skipping' /tmp/pf-cm-test3-err.log 2>/dev/null; then
+if grep -qi 'engine\|unavailable\|skipping\|bypass' /tmp/pf-cm-test3-err.log 2>/dev/null; then
     assert_pass "Warning printed to stderr"
 else
     assert_fail "Warning printed to stderr"

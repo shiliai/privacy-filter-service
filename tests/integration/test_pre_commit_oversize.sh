@@ -15,7 +15,9 @@ Path(sys.argv[1]).write_text("A" * 1024 * 1024, encoding="utf-8")
 PY
 
 git -C "$repo" add large.txt
-PRIVACY_FILTER_URL="$PRIVACY_FILTER_URL" git -C "$repo" commit -m 'oversize file' 2>"$stderr_file" >/dev/null
+# Empty commit message so commit-msg does not hit /redact for the message;
+# any /redact in the log then reflects pre-commit (which must skip the file).
+PRIVACY_FILTER_URL="$PRIVACY_FILTER_URL" git -C "$repo" commit --allow-empty-message -m '' 2>"$stderr_file" >/dev/null
 pfit_assert_no_patch "$repo"
 grep -q 'skipping oversized file' "$stderr_file"
 if pfit_log_contains '"path": "/redact"'; then

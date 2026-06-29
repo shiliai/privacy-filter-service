@@ -54,7 +54,7 @@ uninstall_hooks() {
   fi
 
   if [ -d "$HOOKS_DIR" ]; then
-    local hook_files=("pre-commit" "commit-msg" "_lib.sh")
+    local hook_files=("pre-commit" "commit-msg" "_lib.sh" "pf_fallback.py")
     for hf in "${hook_files[@]}"; do
       if [ -f "$HOOKS_DIR/$hf" ]; then
         rm -f "$HOOKS_DIR/$hf"

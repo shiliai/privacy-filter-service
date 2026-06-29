@@ -96,7 +96,7 @@ detect_hook_managers() {
 
   local found=0
   local marker
-  while IFS= read -r -d '' marker; do
+  while IFS= read -r marker; do
     warn "Hook manager artifact found: $marker"
     found=1
   done < <(
@@ -104,7 +104,7 @@ detect_hook_managers() {
       \( -name '.husky' -type d \
       -o -name '.pre-commit-config.yaml' \
       -o -name 'lefthook.yml' \) \
-      -print0 2>/dev/null | head -z -n 20
+      -print 2>/dev/null | head -n 20
   ) || true
 
   if [ "$found" = "1" ]; then
@@ -119,7 +119,7 @@ detect_hook_managers() {
 copy_hooks() {
   mkdir -p "$TARGET_HOOKS_DIR"
 
-  local hook_files=("pre-commit" "commit-msg" "_lib.sh")
+  local hook_files=("pre-commit" "commit-msg" "_lib.sh" "pf_fallback.py")
   for hf in "${hook_files[@]}"; do
     local src="$PROJECT_ROOT/hooks/$hf"
     local dst="$TARGET_HOOKS_DIR/$hf"

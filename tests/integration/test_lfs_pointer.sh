@@ -14,7 +14,9 @@ size 12345
 LFS_EOF
 
 git -C "$repo" add lfs-pointer.bin
-PRIVACY_FILTER_URL="$PRIVACY_FILTER_URL" git -C "$repo" commit -m 'add lfs pointer' >/dev/null
+# Empty commit message so commit-msg does not hit /redact for the message;
+# any /redact in the log then reflects pre-commit (which must skip the file).
+PRIVACY_FILTER_URL="$PRIVACY_FILTER_URL" git -C "$repo" commit --allow-empty-message -m '' >/dev/null
 
 pfit_assert_no_patch "$repo"
 if pfit_log_contains '"path": "/redact"'; then
