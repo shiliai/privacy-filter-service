@@ -15,6 +15,9 @@ from privacy_filter_service.fast_predict import redact_with_gpu_decode
 from privacy_filter_service.models import RedactionResult
 
 
+CUDA_CACHE_RELEASE_MIN_CHARS = 65_536
+
+
 class OPFEngine:
     """Serialize access to a single OPF instance."""
 
@@ -56,7 +59,10 @@ class OPFEngine:
         await self.warmup()
         async with self._lock:
             opf = self._require_opf()
-            result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
+            try:
+                result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
+            finally:
+                self._release_large_request_cache(text)
             if isinstance(result, str):
                 raise TypeError("OPF.redact() returned text-only output")
             return RedactionResult.model_validate(result.to_dict())
@@ -67,7 +73,10 @@ class OPFEngine:
             opf = self._require_opf()
             results: list[RedactionResult] = []
             for text in texts:
-                result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
+                try:
+                    result: str | OPFRedactionResult = self._redact_with_backend(opf, text)
+                finally:
+                    self._release_large_request_cache(text)
                 if isinstance(result, str):
                     raise TypeError("OPF.redact() returned text-only output")
                 results.append(RedactionResult.model_validate(result.to_dict()))
@@ -77,6 +86,13 @@ class OPFEngine:
         if self.decode_backend == "upstream":
             return opf.redact(text)
         return redact_with_gpu_decode(opf, text)
+
+    def _release_large_request_cache(self, text: str) -> None:
+        if self.device != "cuda" or len(text) < CUDA_CACHE_RELEASE_MIN_CHARS:
+            return
+        import torch
+
+        torch.cuda.empty_cache()
 
     def _require_opf(self) -> OPF:
         if self._opf is None:
