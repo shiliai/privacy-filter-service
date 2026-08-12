@@ -173,6 +173,52 @@ async def test_redact_converts_opf_result_to_pydantic(monkeypatch: pytest.Monkey
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("device", "text_length", "expected_releases"),
+    [
+        ("cuda", opf_engine.CUDA_CACHE_RELEASE_MIN_CHARS, 1),
+        ("cuda", opf_engine.CUDA_CACHE_RELEASE_MIN_CHARS - 1, 0),
+        ("cpu", opf_engine.CUDA_CACHE_RELEASE_MIN_CHARS, 0),
+    ],
+)
+async def test_redact_releases_only_large_cuda_allocations(
+    monkeypatch: pytest.MonkeyPatch,
+    device: Literal["cpu", "cuda"],
+    text_length: int,
+    expected_releases: int,
+) -> None:
+    releases = 0
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def empty_cache() -> None:
+            nonlocal releases
+            releases += 1
+
+    class FakeTorch:
+        cuda: FakeCuda = FakeCuda()
+
+    class FakeOPF:
+        def __init__(self, **_: str) -> None:
+            pass
+
+        def redact(self, text: str) -> SimpleNamespace:
+            return _opf_result(text)
+
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch)
+    monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+
+    engine = opf_engine.OPFEngine(_service_config(device=device))
+    await engine.redact("x" * text_length)
+
+    assert releases == expected_releases
+
+
+@pytest.mark.asyncio
 async def test_redact_batch_serializes_and_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
@@ -191,6 +237,42 @@ async def test_redact_batch_serializes_and_preserves_order(monkeypatch: pytest.M
 
     assert seen == ["test", "one", "two", "three"]
     assert [result.text for result in results] == ["one", "two", "three"]
+
+
+@pytest.mark.asyncio
+async def test_redact_batch_releases_each_large_cuda_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    releases = 0
+
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+        @staticmethod
+        def empty_cache() -> None:
+            nonlocal releases
+            releases += 1
+
+    class FakeTorch:
+        cuda: FakeCuda = FakeCuda()
+
+    class FakeOPF:
+        def __init__(self, **_: str) -> None:
+            pass
+
+        def redact(self, text: str) -> SimpleNamespace:
+            return _opf_result(text)
+
+    monkeypatch.setitem(sys.modules, "torch", FakeTorch)
+    monkeypatch.setattr(opf_engine, "OPF", FakeOPF)
+
+    engine = opf_engine.OPFEngine(_service_config(device="cuda"))
+    large = "x" * opf_engine.CUDA_CACHE_RELEASE_MIN_CHARS
+    await engine.redact_batch(["small", large, large])
+
+    assert releases == 2
 
 
 @pytest.mark.asyncio
