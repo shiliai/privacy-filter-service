@@ -50,7 +50,7 @@ curl -fsS -X POST http://127.0.0.1:8765/redact/text \
 
 **commit-msg hook**: 自动改写提交信息中的 PII（如 `alice@example.com` → `<PRIVATE_EMAIL>`）。始终 exit 0，不阻止提交。
 
-**Fail-open**: 服务不可用时，hook 打印警告并放行，不会阻塞开发流程。
+**Fail-closed**: 服务不可用时先使用本地 fallback；无法完成脱敏验证时默认阻止提交。只有显式设置 `PRIVACY_FILTER_FAIL_OPEN=1` 才放行。
 
 ---
 
@@ -314,7 +314,7 @@ journalctl --user -u privacy-filter -n 50
 
 ### Hook 完整性与冲突
 
-`install/install-hooks.sh` 使用独立的 `~/.config/privacy-filter/git-hooks` 作为全局 dispatcher root。OPF 始终先执行，随后按原退出码执行安装前 `core.hooksPath` 中的同名 hook（Lefthook、Husky 或 pre-commit）。如果 delegate 改变 staged tree 或 commit message，dispatcher 会再运行一次 OPF。原目录不会被覆盖。安装后 dispatcher root 为只读/可执行，普通 postinstall 对该目录的写入会失败而不是静默替换 OPF。后装工具不会自动加入组合；应把它的 hook 安装或恢复到 state/doctor 显示的 delegate 路径，再用干净提交验证两者执行。
+`install/install-hooks.sh` 使用独立的 `~/.config/privacy-filter/git-hooks` 作为全局 dispatcher root。OPF 始终先执行，随后按原退出码执行安装前 `core.hooksPath` 中的同名 hook（Lefthook、Husky 或 pre-commit）。如果 delegate 改变 staged tree 或 commit message，dispatcher 会再运行一次 OPF。原目录不会被覆盖。安装后 dispatcher root 为只读/可执行，普通 postinstall 对该目录的写入会失败而不是静默替换 OPF。后装工具不会自动加入组合；应把它的 hook 安装或恢复到 state/doctor 显示的 delegate 路径，再用干净提交验证两者执行。若保留的自定义 wrapper 本身也调用 OPF，installer 和 doctor 会警告；该 wrapper 会导致 OPF 重复执行，系统不会尝试剥离任意自定义逻辑。
 
 ```bash
 bash install/install-hooks.sh --doctor
@@ -329,27 +329,25 @@ install/install-hooks.sh --doctor  # 检查 dispatcher 未被绕过或修改
 PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
 ```
 
-### 三台主机的受控自部署
+### 三台主机的受控 hooks 自更新
 
-以下流程只适用于已获准的维护窗口；它不是自动部署指令。当前未部署时，先保留每台主机的现状。按 `host-a`（canary）→ `host-b` → `host-c` 的顺序执行，任何一步的停止条件触发时，不再继续下一台。
+以下流程只更新 hooks，不更新服务、依赖、unit 或服务配置。它只适用于已获准的维护窗口；当前未批准时不执行。按 `host-a`（canary）→ `host-b` → `host-c` 的顺序执行，任何一步的停止条件触发时，不再继续下一台。
 
 1. 在每台主机开始前记录并固定回退 revision，并备份现有 hook 配置和受管 state：
 
    ```bash
    prior_revision="$(git rev-parse HEAD)"
-   git status --short
+   test -z "$(git status --porcelain)"  # 不干净则立即停止
    git rev-parse HEAD > ~/.config/privacy-filter/previous-revision
    git config --global --get core.hooksPath > ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true
    cp ~/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state ~/.config/privacy-filter/hooks-state.backup 2>/dev/null || true
    ```
 
-2. 检出经审查的 revision，运行服务和 hooks 安装，再逐项验证：
+2. 检出经审查的 revision，只安装 hooks，再逐项验证：
 
    ```bash
    git checkout <approved-revision>
-   bash install/install-service.sh
    bash install/install-hooks.sh
-   curl -fsS http://127.0.0.1:8765/health
    bash install/install-hooks.sh --doctor
    ```
 
@@ -365,7 +363,7 @@ PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
    rm -rf "$smoke_dir"
    ```
 
-停止条件：health 或 doctor 失败、secret smoke 创建了提交、delegate 未按 doctor 输出运行、或安装修改了未预期文件。发生时立即停止后续主机，并在当前主机执行已验证的 hooks-only 回退：
+停止条件：clean-worktree 断言或 doctor 失败、secret smoke 创建了提交、delegate 未按 doctor 输出运行、或 hooks 安装修改了未预期文件。发生时立即停止后续主机，并在当前主机执行已验证的 hooks-only 回退：
 
 ```bash
 bash install/uninstall.sh --hooks-only

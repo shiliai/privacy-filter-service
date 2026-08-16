@@ -30,13 +30,16 @@ mv "$delegate/pre-commit.tmp" "$delegate/pre-commit"
 chmod 755 "$delegate/pre-commit" "$delegate/commit-msg" "$delegate/_lib.sh" "$delegate/pf_fallback.py"
 git config --global core.hooksPath '~/delegate-hooks/'
 
-PRIVACY_FILTER_HOOKS_DIR="$managed_parent/../managed-parent/hooks" PF_LEGACY_LOG="$legacy_log" bash "$ROOT_DIR/install/install-hooks.sh"
+PRIVACY_FILTER_HOOKS_DIR="$managed_parent/../managed-parent/hooks" PF_LEGACY_LOG="$legacy_log" bash "$ROOT_DIR/install/install-hooks.sh" 2>"$PF_IT_ROOT/custom-wrapper.stderr"
+grep -qF 'custom OPF pre-commit wrapper preserved as delegate and will execute OPF a second time' "$PF_IT_ROOT/custom-wrapper.stderr"
 [ "$(git config --global --get core.hooksPath)" = "$managed" ]
 grep -qF "delegate_hooks_path=$delegate" "$managed/.privacy-filter-hooks-state"
 [ -e "$delegate/pre-commit" ]
 [ ! -e "$delegate/commit-msg" ]
 [ ! -f "$managed/legacy-backup/pre-commit" ]
 [ -f "$managed/legacy-backup/commit-msg" ]
+PRIVACY_FILTER_HOOKS_DIR="$managed" bash "$ROOT_DIR/install/install-hooks.sh" --doctor >/dev/null 2>"$PF_IT_ROOT/custom-wrapper-doctor.stderr"
+grep -qF 'delegate pre-commit contains OPF and will execute it a second time' "$PF_IT_ROOT/custom-wrapper-doctor.stderr"
 
 repo="$PF_IT_ROOT/repo"
 mkdir -p "$repo"
@@ -98,27 +101,40 @@ grep -qF 'delegate_hooks_path=.githooks' "$relative_managed/.privacy-filter-hook
 PRIVACY_FILTER_HOOKS_DIR="$relative_managed" bash "$ROOT_DIR/install/uninstall.sh" --hooks-only
 git config --global core.hooksPath "$managed"
 
+# Git's ~user/path syntax resolves through the OS account database, not the
+# repository root or this test's isolated HOME.
+account_user="$(id -un)"
+account_home="$(python3 -c 'import pwd; print(pwd.getpwuid(__import__("os").getuid()).pw_dir)')"
+user_tilde_managed="$HOME/user-tilde-managed-hooks"
+git config --global core.hooksPath "~$account_user/."
+PRIVACY_FILTER_HOOKS_DIR="$user_tilde_managed" bash "$ROOT_DIR/install/install-hooks.sh"
+grep -qF "delegate_hooks_path=$account_home" "$user_tilde_managed/.privacy-filter-hooks-state"
+PRIVACY_FILTER_HOOKS_DIR="$user_tilde_managed" bash "$ROOT_DIR/install/uninstall.sh" --hooks-only
+[ "$(git config --global --get core.hooksPath)" = "$account_home" ]
+git config --global core.hooksPath "$managed"
+
 # The real incident-era hook identities migrate, while the adjacent custom
 # wrapper coverage above proves marker matches alone are insufficient.
 incident_delegate="$HOME/incident-delegate"
 incident_managed="$HOME/incident-managed-hooks"
 incident_hash_bin="$PF_IT_ROOT/incident-hash-bin"
-system_sha256sum="$(command -v sha256sum)"
 mkdir -p "$incident_delegate" "$incident_hash_bin"
 printf '#!/usr/bin/env bash\n# fake incident pre-commit fixture\nexit 0\n' > "$incident_delegate/pre-commit"
 printf '#!/usr/bin/env bash\n# fake incident commit-msg fixture\nexit 0\n' > "$incident_delegate/commit-msg"
-cat > "$incident_hash_bin/sha256sum" <<'EOF'
+if command -v sha256sum >/dev/null 2>&1; then incident_hash_tool=sha256sum; else incident_hash_tool=shasum; fi
+cat > "$incident_hash_bin/$incident_hash_tool" <<'EOF'
 #!/usr/bin/env bash
-case "${1##*/}" in
-  pre-commit) printf '%s  %s\n' '31eb638ad5444c5daad260af6f457f9248e136f8f3ecf0d41fd42f757ecbc669' "$1" ;;
-  commit-msg) printf '%s  %s\n' '9a6c7f7eeecd2e174868cd435a3a0c6882bd34e17ab487d069df1eae46013170' "$1" ;;
-  *) exec "$PF_SYSTEM_SHA256SUM" "$@" ;;
+for path in "$@"; do :; done
+case "${path##*/}" in
+  pre-commit) printf '%s  %s\n' '31eb638ad5444c5daad260af6f457f9248e136f8f3ecf0d41fd42f757ecbc669' "$path" ;;
+  commit-msg) printf '%s  %s\n' '9a6c7f7eeecd2e174868cd435a3a0c6882bd34e17ab487d069df1eae46013170' "$path" ;;
+  *) exit 2 ;;
 esac
 EOF
-chmod 755 "$incident_hash_bin/sha256sum"
+chmod 755 "$incident_hash_bin/$incident_hash_tool"
 chmod 755 "$incident_delegate/pre-commit" "$incident_delegate/commit-msg"
 git config --global core.hooksPath "$incident_delegate"
-PATH="$incident_hash_bin:$PATH" PF_SYSTEM_SHA256SUM="$system_sha256sum" PRIVACY_FILTER_HOOKS_DIR="$incident_managed" bash "$ROOT_DIR/install/install-hooks.sh"
+PATH="$incident_hash_bin:$PATH" PRIVACY_FILTER_HOOKS_DIR="$incident_managed" bash "$ROOT_DIR/install/install-hooks.sh"
 [ ! -e "$incident_delegate/pre-commit" ]
 [ ! -e "$incident_delegate/commit-msg" ]
 [ -f "$incident_managed/legacy-backup/pre-commit" ]

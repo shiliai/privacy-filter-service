@@ -80,7 +80,7 @@
 **Key properties**:
 - Single uvicorn worker (model not validated for concurrency)
 - All requests serialized via `asyncio.Lock` in `OPFEngine`
-- Fail-open: service down → warn + exit 0, never block developer
+- Fail-closed by default: service down uses the local fallback; an unverified commit is blocked unless `PRIVACY_FILTER_FAIL_OPEN=1` is explicit
 - Sanitized logging: no raw text in journald
 
 ---
@@ -368,7 +368,7 @@ Uvicorn access log: disabled. Exception tracebacks: redacted.
 2. **Use `uv`** for package management, not raw `pip`.
 3. **Single uvicorn worker** — model not validated for concurrency.
 4. **No raw text in logs** — use `RedactFilter`, never `log.info(text)`.
-5. **Fail-open** — service down should never block developer workflow.
+5. **Fail-closed by default** — use the local fallback; only `PRIVACY_FILTER_FAIL_OPEN=1` may explicitly allow an unverified commit.
 6. **No `model_path` in API responses** — security: avoid leaking filesystem layout.
 7. **`model_path` is required** — no silent fallback to `~/.opf/`.
 8. **CUDA validation** — fail-fast at startup, not per-request.

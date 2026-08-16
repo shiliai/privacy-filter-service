@@ -25,6 +25,7 @@ PRIOR_GLOBAL_HOOKS_PATH=""
 PRIOR_DELEGATE_PATH=""
 
 info() { printf '[INFO]  %s\n' "$*"; }
+warn() { printf '[WARN]  %s\n' "$*" >&2; }
 error() { printf '[ERROR] %s\n' "$*" >&2; }
 die() { error "$*"; exit 1; }
 checksum() { cksum < "$1" | awk '{print $1 ":" $2}'; }
@@ -38,6 +39,7 @@ sha256_file() {
   fi
 }
 is_dispatcher() { [ -f "$1" ] && grep -qF '# privacy-filter-dispatcher-v1' "$1"; }
+looks_like_opf_wrapper() { [ -f "$1" ] && grep -qF 'pf_select_engine' "$1" && grep -qF '_lib.sh' "$1"; }
 # Only archive exact, known OPF hook identities. Marker-based detection could
 # delete a user wrapper that invokes OPF and then performs additional checks.
 # The two retired identities are the verified incident-era releases; keeping
@@ -52,13 +54,13 @@ is_legacy_opf() {
     *) return 1 ;;
   esac
 }
-is_relative_hooks_path() { case "$1" in ''|/*|'~/'*) return 1 ;; *) return 0 ;; esac; }
+is_relative_hooks_path() { case "$1" in ''|/*|'~'*) return 1 ;; *) return 0 ;; esac; }
 
 normalize_hooks_path() {
   local value="$1"
   case "$value" in
     '') printf '' ;;
-    '~/'*) value="$HOME/${value#\~/}"; python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$value" ;;
+    '~'*) python3 -c 'import os,sys; value=os.path.expanduser(sys.argv[1]); sys.exit(1) if not os.path.isabs(value) else print(os.path.realpath(value))' "$value" ;;
     /*) python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$value" ;;
     *) return 1 ;;
   esac
@@ -162,6 +164,8 @@ migrate_legacy_opf() {
     MIGRATED_LEGACY_PRE_COMMIT=1
     STAGED_LEGACY_PRE_COMMIT=1
     info 'Staged active legacy OPF pre-commit for archival to prevent double execution'
+  elif [ ! -e "$backup" ] && looks_like_opf_wrapper "$source"; then
+    warn "custom OPF pre-commit wrapper preserved as delegate and will execute OPF a second time: $source"
   fi
   source="$prior/pre-commit.old"
   backup="$TARGET_HOOKS_DIR/legacy-backup/pre-commit.old"
@@ -170,6 +174,8 @@ migrate_legacy_opf() {
     MIGRATED_LEGACY_PRE_COMMIT_OLD=1
     STAGED_LEGACY_PRE_COMMIT_OLD=1
     info 'Staged legacy OPF pre-commit.old for archival; active pre-commit remains the delegate'
+  elif [ ! -e "$backup" ] && looks_like_opf_wrapper "$source"; then
+    warn "custom OPF pre-commit.old wrapper preserved in place: $source"
   fi
   source="$prior/commit-msg"
   backup="$TARGET_HOOKS_DIR/legacy-backup/commit-msg"
@@ -178,6 +184,8 @@ migrate_legacy_opf() {
     MIGRATED_LEGACY_COMMIT_MSG=1
     STAGED_LEGACY_COMMIT_MSG=1
     info 'Staged legacy OPF commit-msg for archival to prevent double execution'
+  elif [ ! -e "$backup" ] && looks_like_opf_wrapper "$source"; then
+    warn "custom OPF commit-msg wrapper preserved as delegate and will execute OPF a second time: $source"
   fi
 }
 
@@ -266,7 +274,7 @@ rollback_install() {
 }
 
 doctor() {
-  local effective effective_identity expected actual file key failed=0 delegate expected_pre expected_msg local_override worktree_override
+  local effective effective_identity expected actual file key failed=0 delegate delegate_identity expected_pre expected_msg local_override worktree_override
   effective="$(git config --get core.hooksPath 2>/dev/null || true)"
   effective_identity="$(normalize_hooks_path "$effective" 2>/dev/null || true)"
   local_override="$(git config --local --get core.hooksPath 2>/dev/null || true)"
@@ -288,14 +296,21 @@ doctor() {
   is_dispatcher "$TARGET_HOOKS_DIR/pre-commit" || { error 'missing or changed OPF pre-commit dispatcher'; failed=1; }
   is_dispatcher "$TARGET_HOOKS_DIR/commit-msg" || { error 'missing or changed OPF commit-msg dispatcher'; failed=1; }
   delegate="$(state_value delegate_hooks_path)"
+  delegate_identity="$(normalize_hooks_path "$delegate" 2>/dev/null || printf '%s' "$delegate")"
   expected_pre="$(state_value delegate_pre_commit_expected)"
   expected_msg="$(state_value delegate_commit_msg_expected)"
   # A relative delegate is resolved per repository by the dispatcher, so this
   # host-level doctor cannot determine whether a particular repository has it.
-  if [ -n "$delegate" ] && ! is_relative_hooks_path "$delegate"; then
-    [ -d "$delegate" ] || { error "delegate hooks directory is missing: $delegate"; failed=1; }
-    [ "$expected_pre" != 1 ] || [ -x "$delegate/pre-commit" ] || { error "expected delegate hook is missing: $delegate/pre-commit"; failed=1; }
-    [ "$expected_msg" != 1 ] || [ -x "$delegate/commit-msg" ] || { error "expected delegate hook is missing: $delegate/commit-msg"; failed=1; }
+  if [ -n "$delegate_identity" ] && ! is_relative_hooks_path "$delegate_identity"; then
+    [ -d "$delegate_identity" ] || { error "delegate hooks directory is missing: $delegate_identity"; failed=1; }
+    [ "$expected_pre" != 1 ] || [ -x "$delegate_identity/pre-commit" ] || { error "expected delegate hook is missing: $delegate_identity/pre-commit"; failed=1; }
+    [ "$expected_msg" != 1 ] || [ -x "$delegate_identity/commit-msg" ] || { error "expected delegate hook is missing: $delegate_identity/commit-msg"; failed=1; }
+    if [ "$expected_pre" = 1 ] && looks_like_opf_wrapper "$delegate_identity/pre-commit"; then
+      warn "delegate pre-commit contains OPF and will execute it a second time: $delegate_identity/pre-commit"
+    fi
+    if [ "$expected_msg" = 1 ] && looks_like_opf_wrapper "$delegate_identity/commit-msg"; then
+      warn "delegate commit-msg contains OPF and will execute it a second time: $delegate_identity/commit-msg"
+    fi
   fi
   if [ "$failed" -ne 0 ]; then error 'privacy-filter hook integrity FAILED; rerun install/install-hooks.sh to repair.'; return 1; fi
   info 'privacy-filter hook integrity OK'
@@ -308,10 +323,13 @@ main() {
   local prior prior_state_value configured configured_identity
   configured="$(git config --global --get core.hooksPath 2>/dev/null || true)"
   configured_identity="$(normalize_hooks_path "$configured" 2>/dev/null || true)"
+  case "$configured" in '~'*) [ -n "$configured_identity" ] || die "cannot resolve user-qualified global core.hooksPath: $configured" ;; esac
   prior="${configured_identity:-$configured}"
   if [ "$configured_identity" = "$TARGET_HOOKS_DIR" ] && [ -f "$STATE_FILE" ]; then
     prior_state_value="$(state_value delegate_hooks_path)"
-    prior="$(normalize_hooks_path "$prior_state_value" 2>/dev/null || printf '%s' "$prior_state_value")"
+    prior="$(normalize_hooks_path "$prior_state_value" 2>/dev/null || true)"
+    case "$prior_state_value" in '~'*) [ -n "$prior" ] || die "cannot resolve user-qualified delegate path in managed state: $prior_state_value" ;; esac
+    [ -n "$prior" ] || prior="$prior_state_value"
     MIGRATED_LEGACY_PRE_COMMIT="$(state_value legacy_pre_commit)"
     MIGRATED_LEGACY_PRE_COMMIT_OLD="$(state_value legacy_pre_commit_old)"
     MIGRATED_LEGACY_COMMIT_MSG="$(state_value legacy_commit_msg)"
