@@ -46,6 +46,74 @@ git commit ─► Hook(pre-commit / commit-msg)
 > **安全设计**：远程服务不可达时，hook **不再**静默放行（旧版 fail-open 会让 PII 漏过）。
 > 现在自动切到本地非模型兜底；连兜底都没有时**默认阻断**提交（`PRIVACY_FILTER_FAIL_OPEN=1` 可显式放行）。
 
+## 三台主机的受控 hooks 自更新（仅在批准窗口执行）
+
+当前没有批准时，不执行任何主机部署。本节只更新 hooks，不更新服务、依赖、unit 或服务配置：按 `host-a`（canary）→ `host-b` → `host-c` 顺序，所有主机使用同一个已审查 revision；任一停止条件命中就停止推进。
+
+每台主机先备份全局 hook 配置、state 和当前 revision：
+
+```bash
+prior_revision="$(git rev-parse HEAD)"
+if [ -n "$(git status --porcelain)" ]; then
+  printf 'ERROR: worktree is not clean; stopping hooks rollout\n' >&2
+  exit 1
+fi
+git rev-parse HEAD > ~/.config/privacy-filter/previous-revision
+git config --global --get core.hooksPath > ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true
+cp ~/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state ~/.config/privacy-filter/hooks-state.backup 2>/dev/null || true
+```
+
+然后检出批准 revision，只安装并验证 dispatcher：
+
+```bash
+git checkout <approved-revision>
+bash install/install-hooks.sh
+bash install/install-hooks.sh --doctor
+```
+
+在临时仓库执行不产生提交的 secret smoke；提交必须失败且 `HEAD` 不存在：
+
+```bash
+(
+  set -euo pipefail
+  smoke_dir="$(mktemp -d)"
+  trap 'rm -rf "$smoke_dir"' EXIT
+  smoke_log="$smoke_dir/commit.log"
+  git -C "$smoke_dir" init
+  git -C "$smoke_dir" config user.name smoke
+  git -C "$smoke_dir" config user.email smoke@example.invalid
+  printf 'token = "AKIAFAKEFAKEFAKEFAKE"\n' > "$smoke_dir/secret.txt"  # fake fixture
+  git -C "$smoke_dir" add secret.txt
+  if git -C "$smoke_dir" commit -m 'secret smoke' >"$smoke_log" 2>&1; then
+    printf 'ERROR: privacy-filter allowed the fake secret smoke\n' >&2
+    exit 1
+  fi
+  if ! grep -qF '[privacy-filter] blocked commit: detected PII' "$smoke_log"; then
+    cat "$smoke_log" >&2
+    printf 'ERROR: commit failed without the privacy-filter PII block marker\n' >&2
+    exit 1
+  fi
+  if ! find "$smoke_dir/.git/privacy-filter" -type f -name 'redact-*.patch' -print -quit | grep -q .; then
+    printf 'ERROR: privacy-filter did not generate a redaction patch\n' >&2
+    exit 1
+  fi
+  if git -C "$smoke_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+    printf 'ERROR: secret smoke unexpectedly created HEAD\n' >&2
+    exit 1
+  fi
+)
+```
+
+停止条件：clean-worktree 断言或 doctor 失败、secret smoke 创建提交、delegate 未按 doctor 输出运行、或出现预期外文件修改。停止后仅在当前主机执行：
+
+```bash
+bash install/uninstall.sh --hooks-only
+test "$(git config --global --get core.hooksPath 2>/dev/null || true)" = "$(cat ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true)"
+git checkout "$(cat ~/.config/privacy-filter/previous-revision)"
+```
+
+确认 hooks-only 回退成功、hooksPath 已恢复且外部 backup/state 副本保留后，才允许排查；只有 canary 全部通过才推进下一台。
+
 ---
 
 ## 前置确认（MUST ASK FIRST）
@@ -75,9 +143,9 @@ curl -fsS http://<HOST>:8765/health | jq .
 
 ```
 A) 全局（所有 git 仓库）— core.hooksPath
-   - 一次安装，所有仓库受保护；会覆盖已有全局 hooks（Husky/Lefthook）
+   - 一次安装，所有仓库受保护；原全局 hooksPath 作为 OPF 后置 delegate 保留
 B) 指定仓库 — 复制到 .git/hooks/
-   - 不影响其他仓库；每个仓库单独装
+   - 不影响其他仓库；不具备全局 dispatcher 的组合、锁定与 doctor 保证
 ```
 
 ---
@@ -205,21 +273,22 @@ bash install/install-hooks.sh
 ```
 
 脚本会：
-- 检查 `core.hooksPath` 是否已被占用（如有 Husky 等会警告）
-- 复制 hooks 到 `~/.config/git/hooks/`
-- 设置 `git config --global core.hooksPath ~/.config/git/hooks`
+- 保留当前 `core.hooksPath` 作为 OPF 之后的 delegate（不覆盖原 hook 文件）
+- 安装并锁定 `~/.config/privacy-filter/git-hooks/` 中的 OPF-first dispatcher
+- 设置 `git config --global core.hooksPath ~/.config/privacy-filter/git-hooks`
+- 支持 `bash install/install-hooks.sh --doctor` 检查有效 hooksPath、校验和和目录权限
 
-如果已有 `core.hooksPath`：
+如果已有 `core.hooksPath`，安装器会自动保留并链式执行它；卸载会恢复该路径。注意同一用户仍可通过本地/worktree `core.hooksPath`、`chmod` 或 `git commit --no-verify` 绕过 hook，doctor 应纳入巡检。
 
 ```bash
-bash install/install-hooks.sh --force   # 备份旧路径后覆盖
+bash install/install-hooks.sh --doctor  # 检查 dispatcher 完整性
 ```
 
 验证：
 
 ```bash
 git config --global core.hooksPath
-# 期望: /home/<user>/.config/git/hooks
+# 期望: /home/<user>/.config/privacy-filter/git-hooks
 ```
 
 #### 5b. 指定仓库 Hooks
@@ -374,10 +443,10 @@ curl -fsS http://192.168.88.75:8765/health | jq .
 ```bash
 git clone git@github.com:shiliai/privacy-filter-service.git ~/project/docker/privacy-filter-service
 cd ~/project/docker/privacy-filter-service
-bash install/install-hooks.sh          # 全局；或按路径 A 的"步骤 5b"复制到指定仓库
+bash install/install-hooks.sh          # 推荐的全局受管安装
 ```
 
-脚本会把 `pre-commit`、`commit-msg`、`_lib.sh`、`pf_fallback.py` 一起装到 `~/.config/git/hooks/`。
+脚本会把 dispatcher、OPF hooks、`_lib.sh`、`pf_fallback.py` 一起装到 `~/.config/privacy-filter/git-hooks/`，并把原 hooksPath 保存为 delegate。
 
 > `install-hooks.sh` 已兼容 macOS 自带的 bash 3.2（不使用 `mapfile` / `declare -A` 等 4.0+ 语法，也不依赖 GNU `head -z`）。
 
@@ -483,13 +552,13 @@ git log --oneline -1
 grep -nE 'AIza|sk_live' hooks/pf_fallback.py    # 例：确认新的 secret 规则已存在
 ```
 
-### 2. 重装 hooks（覆盖为新版）
+### 2. 重装或修复受管 hooks
 
 ```bash
 bash install/install-hooks.sh        # 全局；或按「部署路径 A 步骤 5b」重装到指定仓库
 ```
 
-`core.hooksPath` 已指向同一目录时，脚本原地覆盖更新。主引擎地址若已用 `git config privacyfilter.url` 设置，**不受重装影响**（存于 git config，非仓库文件）。
+`core.hooksPath` 已指向受管目录时，脚本会校验 ownership state 后修复缺失或损坏的 managed 文件。它不会改写 mutable delegate 内容。主引擎地址若已用 `git config privacyfilter.url` 设置，**不受重装影响**。
 
 ### 3. 升级本机 GPU 服务端（仅 Track 1b）
 
@@ -555,11 +624,11 @@ nvidia-smi
 
 ### Q: 全局 hooks 与 Husky/Lefthook 冲突
 
-全局 `core.hooksPath` 会覆盖仓库级别的 hooks。解决方案：
+安装器只会自动组合**安装时已配置的全局 hooksPath**。之后安装的工具不会被自动组合；若它无法写入锁定的 managed root，应把生成的 hook 安装/恢复到 doctor 输出的 delegate 路径。仓库本地/worktree `core.hooksPath` 仍可绕过全局配置，doctor 会报告但无法阻止。
 
-1. **使用指定仓库安装**（部署路径 5b）代替全局安装
-2. 或在受影响仓库中 `PRIVACY_FILTER_SKIP=1 git commit`
-3. 或使用 `install/install-hooks.sh --force` 备份旧 hooks 后切换
+1. 运行 `install/install-hooks.sh --doctor` 确认 dispatcher、delegate 目录与预期 hook 均存在
+2. 将后装工具的 hook 放到已保存的 delegate 路径，再用干净提交验证 OPF 与该工具都执行
+3. 不要用仓库本地 `core.hooksPath` 作为组合方案；它会绕过全局 OPF
 
 ### Q: 服务不可用时，提交会怎样？
 
@@ -588,13 +657,15 @@ git restore --staged <file>  # 取消暂存
 ```bash
 cd ~/project/docker/privacy-filter-service
 bash install/uninstall.sh
+# 仅回滚 hooks、保持服务运行：
+bash install/uninstall.sh --hooks-only
 ```
 
 卸载操作：
 - 停止并禁用 systemd 服务
 - 删除 systemd unit 文件
-- 清除 `core.hooksPath`（仅当指向我们的目录时）
-- 删除 hooks 文件
+- 恢复安装前的全局 `core.hooksPath`（仅当仍指向受管目录时）
+- 删除受管 hooks 文件；原 delegate 文件不删除
 - **保留** `~/.config/privacy-filter/config.toml` 和 `env`
 
 ---

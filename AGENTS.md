@@ -15,7 +15,7 @@
 - **GPU**: RTX 3090, CUDA 11.8, PyTorch 2.7.1
 - **Package manager**: `uv` (NOT pip directly)
 - **Service manager**: systemd user unit (`systemctl --user`)
-- **Hook mechanism**: `git config --global core.hooksPath ~/.config/git/hooks`
+- **Hook mechanism**: `git config --global core.hooksPath ~/.config/privacy-filter/git-hooks`
 
 ---
 
@@ -30,7 +30,7 @@
 │   ├── opf_engine.py       # Async OPF wrapper with asyncio.Lock
 │   └── logging_setup.py    # Sanitized JSON logging + request ID middleware
 ├── hooks/
-│   ├── _lib.sh             # Shared bash library (HTTP, file detection, fail-open)
+│   ├── _lib.sh             # Shared bash library (HTTP, file detection, fail-closed)
 │   ├── pre-commit          # Pre-commit hook (scan staged files, generate patch)
 │   └── commit-msg          # Commit-msg hook (auto-redact PII in message)
 ├── install/
@@ -80,7 +80,7 @@
 **Key properties**:
 - Single uvicorn worker (model not validated for concurrency)
 - All requests serialized via `asyncio.Lock` in `OPFEngine`
-- Fail-open: service down → warn + exit 0, never block developer
+- Fail-closed by default: service down uses the local fallback; an unverified commit is blocked unless `PRIVACY_FILTER_FAIL_OPEN=1` is explicit
 - Sanitized logging: no raw text in journald
 
 ---
@@ -277,7 +277,7 @@ git commit --no-verify -m "skip"              # git flag
 
 ### Integration test details
 
-Each test creates an isolated repo in `/tmp/pf-it-<name>-<rand>/` with its own `GIT_CONFIG_GLOBAL` (no pollution of real `~/.gitconfig`). Tests cover: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment, service-down fail-open, skip bypass, no-verify bypass, concurrent commits, installer collision/force/uninstall.
+Each test creates an isolated repo in `/tmp/pf-it-<name>-<rand>/` with its own `GIT_CONFIG_GLOBAL` (no pollution of real `~/.gitconfig`). Tests cover: clean commit, PII commit + patch apply, partial staging abort, binary skip, oversize skip, LFS pointer skip, commit-msg redact/clean/comment, service-down fail-closed fallback, skip bypass, no-verify bypass, concurrent commits, and managed-hook install, repair, and rollback.
 
 ### Writing new tests
 
@@ -304,17 +304,17 @@ This: validates prereqs → creates venv → installs deps → deploys config.to
 bash install/install-hooks.sh
 ```
 
-This: checks `core.hooksPath` collision → copies hooks → sets `core.hooksPath`. Use `--force` to override existing path.
+This: installs an OPF-owned dispatcher root at `~/.config/privacy-filter/git-hooks`, preserves the prior global path as a delegate, and locks the managed root. `--force` is accepted only for compatibility and is not required.
 
-### Current deployment state
+### Example deployment state (verify before acting)
 
 ```
 Service:   systemctl --user is-active privacy-filter.service → active
 Config:    ~/.config/privacy-filter/config.toml (device=cuda, output_mode=typed)
 Env:       ~/.config/privacy-filter/env (all commented = using toml defaults)
 Unit:      ~/.config/systemd/user/privacy-filter.service
-Hooks:     ~/.config/git/hooks/{pre-commit, commit-msg, _lib.sh}
-hooksPath: /home/chriswang/.config/git/hooks
+Hooks:     ~/.config/privacy-filter/git-hooks/{pre-commit, commit-msg, _lib.sh}
+hooksPath: /home/chriswang/.config/privacy-filter/git-hooks
 Model:     /mnt/LLM/OpenAI/privacy_filter (RTX 3090)
 ```
 
@@ -348,7 +348,7 @@ Preserves `~/.config/privacy-filter/config.toml` and `env`.
 | 422 | Validation error | Invalid JSON, missing fields, batch > 100 |
 | 503 | Not ready | Engine warming up or startup failure |
 
-Hook fail-open: connection refused / timeout / 5xx / malformed JSON → warn + exit 0.
+Hook failures are fail-closed by default. The local fallback is attempted first; `PRIVACY_FILTER_FAIL_OPEN=1` is an explicit, auditable opt-in to allow an unredacted commit.
 
 ---
 
@@ -368,7 +368,7 @@ Uvicorn access log: disabled. Exception tracebacks: redacted.
 2. **Use `uv`** for package management, not raw `pip`.
 3. **Single uvicorn worker** — model not validated for concurrency.
 4. **No raw text in logs** — use `RedactFilter`, never `log.info(text)`.
-5. **Fail-open** — service down should never block developer workflow.
+5. **Fail-closed by default** — use the local fallback; only `PRIVACY_FILTER_FAIL_OPEN=1` may explicitly allow an unverified commit.
 6. **No `model_path` in API responses** — security: avoid leaking filesystem layout.
 7. **`model_path` is required** — no silent fallback to `~/.opf/`.
 8. **CUDA validation** — fail-fast at startup, not per-request.

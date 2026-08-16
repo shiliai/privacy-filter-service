@@ -74,6 +74,7 @@ make_test_home() {
 
 cleanup_test_home() {
   local home="$1"
+  chmod -R u+w "$home" 2>/dev/null || true
   rm -rf "$home"
 }
 
@@ -167,11 +168,11 @@ test_clean_install() {
 
   local hooks_path
   hooks_path="$(HOME="$home" git config --global core.hooksPath 2>/dev/null)" || true
-  assert_eq "core.hooksPath set to our dir" "$home/.config/git/hooks" "$hooks_path"
+  assert_eq "core.hooksPath set to managed dispatcher root" "$home/.config/privacy-filter/git-hooks" "$hooks_path"
 
-  assert_file_exists "pre-commit hook copied" "$home/.config/git/hooks/pre-commit"
-  assert_file_exists "commit-msg hook copied" "$home/.config/git/hooks/commit-msg"
-  assert_file_exists "_lib.sh copied" "$home/.config/git/hooks/_lib.sh"
+  assert_file_exists "pre-commit dispatcher copied" "$home/.config/privacy-filter/git-hooks/pre-commit"
+  assert_file_exists "commit-msg dispatcher copied" "$home/.config/privacy-filter/git-hooks/commit-msg"
+  assert_file_exists "_lib.sh copied" "$home/.config/privacy-filter/git-hooks/_lib.sh"
 
   assert_contains "output mentions completion" "$output" "Hook installation complete"
 
@@ -180,7 +181,7 @@ test_clean_install() {
 }
 
 # ============================================================================
-# Test 2: install-hooks.sh — collision aborts
+# Test 2: install-hooks.sh — prior path is composed rather than overwritten
 # ============================================================================
 test_collision_abort() {
   printf '\n--- test_collision_abort ---\n'
@@ -190,27 +191,23 @@ test_collision_abort() {
 
   make_test_home "$home"
 
-  HOME="$home" git config --global core.hooksPath "/some/other/path"
+  mkdir -p "$home/some/other/path"
+  HOME="$home" git config --global core.hooksPath "$home/some/other/path"
 
   local output
-  output="$(HOME="$home" bash "$INSTALL_DIR/install-hooks.sh" 2>&1)" && {
-    printf '  FAIL: install-hooks.sh should have exited non-zero on collision\n' >&2
-    fail=$((fail + 1))
-  } || {
-    assert_contains "aborts with collision message" "$output" "Aborting to avoid silently overriding"
-    assert_contains "suggests --force" "$output" "--force"
-  }
+  output="$(HOME="$home" bash "$INSTALL_DIR/install-hooks.sh" 2>&1)" || true
 
   local hooks_path
   hooks_path="$(HOME="$home" git config --global core.hooksPath 2>/dev/null)" || true
-  assert_eq "core.hooksPath unchanged after collision" "/some/other/path" "$hooks_path"
+  assert_eq "core.hooksPath changed to managed dispatcher root" "$home/.config/privacy-filter/git-hooks" "$hooks_path"
+  assert_contains "prior path retained as delegate" "$(cat "$home/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state")" "delegate_hooks_path=$home/some/other/path"
 
   cleanup_test_home "$home"
   trap - RETURN
 }
 
 # ============================================================================
-# Test 3: install-hooks.sh --force — overrides with backup
+# Test 3: --force remains compatible and preserves the prior path as delegate
 # ============================================================================
 test_force_override() {
   printf '\n--- test_force_override ---\n'
@@ -229,14 +226,11 @@ test_force_override() {
 
   local hooks_path
   hooks_path="$(HOME="$home" git config --global core.hooksPath 2>/dev/null)" || true
-  assert_eq "core.hooksPath updated to our dir" "$home/.config/git/hooks" "$hooks_path"
+  assert_eq "core.hooksPath updated to managed root" "$home/.config/privacy-filter/git-hooks" "$hooks_path"
+  assert_contains "prior path saved as delegate" "$(cat "$home/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state")" "delegate_hooks_path=$home/other-hooks"
 
-  local backup_count
-  backup_count="$(find "$home" -maxdepth 1 -name 'other-hooks.bak-*' | wc -l)"
-  assert_eq "backup created" "1" "$backup_count"
-
-  assert_file_exists "pre-commit hook copied" "$home/.config/git/hooks/pre-commit"
-  assert_file_exists "commit-msg hook copied" "$home/.config/git/hooks/commit-msg"
+  assert_file_exists "pre-commit dispatcher copied" "$home/.config/privacy-filter/git-hooks/pre-commit"
+  assert_file_exists "commit-msg dispatcher copied" "$home/.config/privacy-filter/git-hooks/commit-msg"
 
   cleanup_test_home "$home"
   trap - RETURN
@@ -263,16 +257,19 @@ test_uninstall() {
 
   touch "$home/.config/systemd/user/privacy-filter.service"
 
+  # Install first so uninstallation has ownership state and restores the prior path.
+  HOME="$home" bash "$INSTALL_DIR/install-hooks.sh" >/dev/null 2>&1
+
   local output
   output="$(HOME="$home" bash "$INSTALL_DIR/uninstall.sh" 2>&1)" || true
 
   local hooks_path
   hooks_path="$(HOME="$home" git config --global core.hooksPath 2>/dev/null)" || true
-  assert_eq "core.hooksPath unset" "" "$hooks_path"
+  assert_eq "core.hooksPath restored" "$home/.config/git/hooks" "$hooks_path"
 
-  assert_file_not_exists "pre-commit hook removed" "$home/.config/git/hooks/pre-commit"
-  assert_file_not_exists "commit-msg hook removed" "$home/.config/git/hooks/commit-msg"
-  assert_file_not_exists "_lib.sh removed" "$home/.config/git/hooks/_lib.sh"
+  assert_file_exists "prior pre-commit preserved" "$home/.config/git/hooks/pre-commit"
+  assert_file_exists "prior commit-msg preserved" "$home/.config/git/hooks/commit-msg"
+  assert_file_exists "prior _lib.sh preserved" "$home/.config/git/hooks/_lib.sh"
 
   assert_file_exists "user config.toml preserved" "$home/.config/privacy-filter/config.toml"
   assert_file_exists "user env preserved" "$home/.config/privacy-filter/env"

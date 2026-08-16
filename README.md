@@ -50,7 +50,7 @@ curl -fsS -X POST http://127.0.0.1:8765/redact/text \
 
 **commit-msg hook**: 自动改写提交信息中的 PII（如 `alice@example.com` → `<PRIVATE_EMAIL>`）。始终 exit 0，不阻止提交。
 
-**Fail-open**: 服务不可用时，hook 打印警告并放行，不会阻塞开发流程。
+**Fail-closed**: 服务不可用时先使用本地 fallback；无法完成脱敏验证时默认阻止提交。只有显式设置 `PRIVACY_FILTER_FAIL_OPEN=1` 才放行。
 
 ---
 
@@ -312,18 +312,94 @@ journalctl --user -u privacy-filter -n 50
 - **CPU 配置过大** — `device = "cpu"` 时必须设置 `max_file_bytes <= 1024`
 - **配置文件不存在** — 重新运行 `install/install-service.sh`
 
-### Hook 冲突
+### Hook 完整性与冲突
 
-如果某些仓库已使用 Husky、pre-commit 或 Lefthook，全局 `core.hooksPath` 会覆盖它们的 hooks。解决方案:
+`install/install-hooks.sh` 使用独立的 `~/.config/privacy-filter/git-hooks` 作为全局 dispatcher root。OPF 始终先执行，随后按原退出码执行安装前 `core.hooksPath` 中的同名 hook（Lefthook、Husky 或 pre-commit）。如果 delegate 改变 staged tree 或 commit message，dispatcher 会再运行一次 OPF。原目录不会被覆盖。安装后 dispatcher root 为只读/可执行，普通 postinstall 对该目录的写入会失败而不是静默替换 OPF。后装工具不会自动加入组合；应把它的 hook 安装或恢复到 state/doctor 显示的 delegate 路径，再用干净提交验证两者执行。若保留的自定义 wrapper 本身也调用 OPF，installer 和 doctor 会警告；该 wrapper 会导致 OPF 重复执行，系统不会尝试剥离任意自定义逻辑。
 
 ```bash
-install/install-hooks.sh --force   # 备份旧路径并切换
+bash install/install-hooks.sh --doctor
+```
+
+doctor 会检查有效的（包含仓库本地/worktree 配置）`core.hooksPath`、文件校验和及目录权限，并输出当前 delegate 路径。重装可修复受损 dispatcher；卸载会恢复先前的全局 hooksPath，且不会删除原 hook 目录。相对 delegate 按每个仓库根目录解析，因此 host 级 doctor 只能报告该路径，不能断言每个仓库都存在它。
+
+这不是特权安全边界：`git commit --no-verify`、仓库本地 `core.hooksPath`，或能够 `chmod` 该目录的同一用户仍可绕过 hook。应将 doctor 纳入主机巡检。
+
+```bash
+install/install-hooks.sh --doctor  # 检查 dispatcher 未被绕过或修改
 PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
 ```
 
-### Fail-open 警告
+### 三台主机的受控 hooks 自更新
 
-服务不可用时，hook 打印警告并放行提交。这是设计行为，不会阻塞你的工作。检查 `journalctl` 了解原因。
+以下流程只更新 hooks，不更新服务、依赖、unit 或服务配置。它只适用于已获准的维护窗口；当前未批准时不执行。按 `host-a`（canary）→ `host-b` → `host-c` 的顺序执行，任何一步的停止条件触发时，不再继续下一台。
+
+1. 在每台主机开始前记录并固定回退 revision，并备份现有 hook 配置和受管 state：
+
+   ```bash
+   prior_revision="$(git rev-parse HEAD)"
+   if [ -n "$(git status --porcelain)" ]; then
+     printf 'ERROR: worktree is not clean; stopping hooks rollout\n' >&2
+     exit 1
+   fi
+   git rev-parse HEAD > ~/.config/privacy-filter/previous-revision
+   git config --global --get core.hooksPath > ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true
+   cp ~/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state ~/.config/privacy-filter/hooks-state.backup 2>/dev/null || true
+   ```
+
+2. 检出经审查的 revision，只安装 hooks，再逐项验证：
+
+   ```bash
+   git checkout <approved-revision>
+   bash install/install-hooks.sh
+   bash install/install-hooks.sh --doctor
+   ```
+
+3. 在临时仓库做不产生提交的 secret smoke。下面的提交必须被阻止，随后检查 `HEAD` 仍不存在：
+
+   ```bash
+   (
+     set -euo pipefail
+     smoke_dir="$(mktemp -d)"
+     trap 'rm -rf "$smoke_dir"' EXIT
+     smoke_log="$smoke_dir/commit.log"
+     git -C "$smoke_dir" init
+     git -C "$smoke_dir" config user.name smoke
+     git -C "$smoke_dir" config user.email smoke@example.invalid
+     printf 'token = "AKIAFAKEFAKEFAKEFAKE"\n' > "$smoke_dir/secret.txt"  # fake fixture
+     git -C "$smoke_dir" add secret.txt
+     if git -C "$smoke_dir" commit -m 'secret smoke' >"$smoke_log" 2>&1; then
+       printf 'ERROR: privacy-filter allowed the fake secret smoke\n' >&2
+       exit 1
+     fi
+     if ! grep -qF '[privacy-filter] blocked commit: detected PII' "$smoke_log"; then
+       cat "$smoke_log" >&2
+       printf 'ERROR: commit failed without the privacy-filter PII block marker\n' >&2
+       exit 1
+     fi
+     if ! find "$smoke_dir/.git/privacy-filter" -type f -name 'redact-*.patch' -print -quit | grep -q .; then
+       printf 'ERROR: privacy-filter did not generate a redaction patch\n' >&2
+       exit 1
+     fi
+     if git -C "$smoke_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+       printf 'ERROR: secret smoke unexpectedly created HEAD\n' >&2
+       exit 1
+     fi
+   )
+   ```
+
+停止条件：clean-worktree 断言或 doctor 失败、secret smoke 创建了提交、delegate 未按 doctor 输出运行、或 hooks 安装修改了未预期文件。发生时立即停止后续主机，并在当前主机执行已验证的 hooks-only 回退：
+
+```bash
+bash install/uninstall.sh --hooks-only
+test "$(git config --global --get core.hooksPath 2>/dev/null || true)" = "$(cat ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true)"
+git checkout "$(cat ~/.config/privacy-filter/previous-revision)"
+```
+
+回退后确认 hooks-only 命令返回成功、全局 hooksPath 已恢复，并保留上面创建的外部 backup/state 副本供排查。只有 canary 的全部检查通过，才按同一 pinned revision 推进到下一台主机。
+
+### 服务不可用
+
+服务不可用时，hook 默认使用本地 fallback 并 fail-closed，不会静默放行未验证的提交。只有显式设置 `PRIVACY_FILTER_FAIL_OPEN=1` 才会允许未脱敏提交；`PRIVACY_FILTER_SKIP=1` 是另一种显式绕过。检查 `journalctl` 了解原因。
 
 ### Partial staging 错误
 
@@ -373,9 +449,11 @@ OPF_CHECKPOINT=/mnt/LLM/OpenAI/privacy_filter \
 
 ```bash
 bash install/uninstall.sh
+# 仅回滚 hooks，保持 privacy-filter 服务运行
+bash install/uninstall.sh --hooks-only
 ```
 
-停止服务、删除 unit 文件、取消 `core.hooksPath`、删除 hooks。保留 `~/.config/privacy-filter/config.toml` 和 `env`。
+完整卸载会停止服务、删除 unit，并恢复安装前的全局 `core.hooksPath`；`--hooks-only` 只恢复 hook 配置和受管文件。两者都保留原 delegate 目录、`config.toml` 和 `env`。
 
 ---
 
