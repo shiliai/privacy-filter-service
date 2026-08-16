@@ -1,92 +1,75 @@
 #!/usr/bin/env bash
-# uninstall.sh — remove privacy-filter service and hooks.
-# Preserves user config (config.toml, env).
+# Remove only the OPF-owned dispatcher root and restore the prior global path.
 set -euo pipefail
 
 CONFIG_DIR="$HOME/.config/privacy-filter"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
-HOOKS_DIR="$HOME/.config/git/hooks"
+HOOKS_INPUT="${PRIVACY_FILTER_HOOKS_DIR:-$HOME/.config/privacy-filter/git-hooks}"
+case "$HOOKS_INPUT" in /*) ;; *) printf '[ERROR] managed hooks path must be absolute: %s\n' "$HOOKS_INPUT" >&2; exit 1 ;; esac
+HOOKS_DIR="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$HOOKS_INPUT")"
+STATE_FILE="$HOOKS_DIR/.privacy-filter-hooks-state"
+HOOKS_ONLY=false
 SERVICE_NAME="privacy-filter.service"
 UNIT_FILE="$SYSTEMD_DIR/$SERVICE_NAME"
-
-info()  { printf '[\033[1;34mINFO\033[0m]  %s\n' "$*"; }
-warn()  { printf '[\033[1;33mWARN\033[0m]  %s\n' "$*" >&2; }
-ok()    { printf '[\033[1;32m OK \033[0m]  %s\n' "$*"; }
-
-# ---------------------------------------------------------------------------
-# 1. Stop and disable systemd service
-# ---------------------------------------------------------------------------
-uninstall_service() {
-  if systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
-    info "Stopping $SERVICE_NAME…"
-    systemctl --user stop "$SERVICE_NAME"
-    ok "Service stopped"
-  else
-    info "Service not running"
-  fi
-
-  if systemctl --user is-enabled --quiet "$SERVICE_NAME" 2>/dev/null; then
-    systemctl --user disable "$SERVICE_NAME"
-    ok "Service disabled"
-  fi
-
-  if [ -f "$UNIT_FILE" ]; then
-    rm -f "$UNIT_FILE"
-    ok "Unit file removed"
-    systemctl --user daemon-reload
-  fi
+info() { printf '[INFO]  %s\n' "$*"; }; warn() { printf '[WARN]  %s\n' "$*" >&2; }; ok() { printf '[ OK ]  %s\n' "$*"; }
+state_value() { sed -n "s/^$1=//p" "$STATE_FILE" 2>/dev/null | head -n 1; }
+normalize_hooks_path() {
+  local value="$1"
+  case "$value" in
+    '') printf '' ;;
+    '~/'*) value="$HOME/${value#\~/}"; python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$value" ;;
+    /*) python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$value" ;;
+    *) return 1 ;;
+  esac
+}
+parse_args() {
+  for arg in "$@"; do
+    case "$arg" in
+      --hooks-only) HOOKS_ONLY=true ;;
+      -h|--help) printf 'Usage: %s [--hooks-only]\n' "$0"; exit 0 ;;
+      *) printf '[ERROR] unknown argument: %s\n' "$arg" >&2; exit 1 ;;
+    esac
+  done
 }
 
-# ---------------------------------------------------------------------------
-# 2. Unset core.hooksPath if it points to our hooks directory
-# ---------------------------------------------------------------------------
+uninstall_service() {
+  systemctl --user is-active --quiet "$SERVICE_NAME" 2>/dev/null && systemctl --user stop "$SERVICE_NAME" || true
+  systemctl --user is-enabled --quiet "$SERVICE_NAME" 2>/dev/null && systemctl --user disable "$SERVICE_NAME" || true
+  if [ -f "$UNIT_FILE" ]; then rm -f "$UNIT_FILE"; systemctl --user daemon-reload || true; fi
+}
 uninstall_hooks() {
-  local current
-  current="$(git config --global core.hooksPath 2>/dev/null)" || true
-
-  if [ "$current" = "$HOOKS_DIR" ]; then
-    git config --global --unset core.hooksPath
-    ok "core.hooksPath unset"
-  elif [ -n "$current" ]; then
-    warn "core.hooksPath is set to: $current (not our directory — leaving as-is)"
+  local current prior file legacy
+  [ -f "$STATE_FILE" ] || { warn 'No privacy-filter ownership state; leaving hooks and git configuration unchanged'; return; }
+  prior="$(state_value delegate_hooks_path)"
+  current="$(git config --global --get core.hooksPath 2>/dev/null || true)"
+  if [ "$(normalize_hooks_path "$current" 2>/dev/null || true)" = "$HOOKS_DIR" ]; then
+    if [ -n "$prior" ]; then git config --global core.hooksPath "$prior"; else git config --global --unset core.hooksPath || true; fi
+    ok 'core.hooksPath restored'
   else
-    info "core.hooksPath not set"
+    warn "global core.hooksPath changed to '$current'; leaving it unchanged"
   fi
-
-  if [ -d "$HOOKS_DIR" ]; then
-    local hook_files=("pre-commit" "commit-msg" "_lib.sh" "pf_fallback.py")
-    for hf in "${hook_files[@]}"; do
-      if [ -f "$HOOKS_DIR/$hf" ]; then
-        rm -f "$HOOKS_DIR/$hf"
+  chmod 700 "$HOOKS_DIR"
+  if [ -n "$prior" ] && [ -d "$prior" ]; then
+    for legacy in pre-commit pre-commit.old commit-msg; do
+      if [ -f "$HOOKS_DIR/legacy-backup/$legacy" ]; then
+        if [ -e "$prior/$legacy" ]; then
+          warn "not restoring legacy $legacy: destination exists; recover from $HOOKS_DIR/legacy-backup/$legacy"
+        else
+          mv "$HOOKS_DIR/legacy-backup/$legacy" "$prior/$legacy"
+        fi
       fi
     done
-    rmdir "$HOOKS_DIR" 2>/dev/null && ok "Hooks directory removed" || warn "Hooks directory not empty — left in place"
   fi
+  for file in pre-commit commit-msg _lib.sh pf_fallback.py pre-commit.opf commit-msg.opf .privacy-filter-hooks-state; do rm -f "$HOOKS_DIR/$file"; done
+  rmdir "$HOOKS_DIR/legacy-backup" 2>/dev/null || true
+  rmdir "$HOOKS_DIR" 2>/dev/null || warn "managed hooks directory not empty: $HOOKS_DIR"
 }
-
-# ---------------------------------------------------------------------------
-# 3. Preserve user config, report what was kept
-# ---------------------------------------------------------------------------
-report_preserved() {
-  if [ -f "$CONFIG_DIR/config.toml" ]; then
-    info "Preserved: $CONFIG_DIR/config.toml"
-  fi
-  if [ -f "$CONFIG_DIR/env" ]; then
-    info "Preserved: $CONFIG_DIR/env"
-  fi
-}
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 main() {
-  info "Uninstalling privacy-filter…"
-
-  uninstall_service
+  parse_args "$@"
+  if [ "$HOOKS_ONLY" = false ]; then uninstall_service; else info 'Rolling back privacy-filter hooks only; service left unchanged'; fi
   uninstall_hooks
-  report_preserved
-
-  ok "Uninstall complete. User config preserved in $CONFIG_DIR/"
+  [ -f "$CONFIG_DIR/config.toml" ] && info "Preserved: $CONFIG_DIR/config.toml"
+  [ -f "$CONFIG_DIR/env" ] && info "Preserved: $CONFIG_DIR/env"
+  ok 'Uninstall complete.'
 }
-
 main "$@"

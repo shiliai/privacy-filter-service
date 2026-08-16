@@ -75,9 +75,9 @@ curl -fsS http://<HOST>:8765/health | jq .
 
 ```
 A) 全局（所有 git 仓库）— core.hooksPath
-   - 一次安装，所有仓库受保护；会覆盖已有全局 hooks（Husky/Lefthook）
+   - 一次安装，所有仓库受保护；原全局 hooksPath 作为 OPF 后置 delegate 保留
 B) 指定仓库 — 复制到 .git/hooks/
-   - 不影响其他仓库；每个仓库单独装
+   - 不影响其他仓库；不具备全局 dispatcher 的组合、锁定与 doctor 保证
 ```
 
 ---
@@ -205,21 +205,22 @@ bash install/install-hooks.sh
 ```
 
 脚本会：
-- 检查 `core.hooksPath` 是否已被占用（如有 Husky 等会警告）
-- 复制 hooks 到 `~/.config/git/hooks/`
-- 设置 `git config --global core.hooksPath ~/.config/git/hooks`
+- 保留当前 `core.hooksPath` 作为 OPF 之后的 delegate（不覆盖原 hook 文件）
+- 安装并锁定 `~/.config/privacy-filter/git-hooks/` 中的 OPF-first dispatcher
+- 设置 `git config --global core.hooksPath ~/.config/privacy-filter/git-hooks`
+- 支持 `bash install/install-hooks.sh --doctor` 检查有效 hooksPath、校验和和目录权限
 
-如果已有 `core.hooksPath`：
+如果已有 `core.hooksPath`，安装器会自动保留并链式执行它；卸载会恢复该路径。注意同一用户仍可通过本地/worktree `core.hooksPath`、`chmod` 或 `git commit --no-verify` 绕过 hook，doctor 应纳入巡检。
 
 ```bash
-bash install/install-hooks.sh --force   # 备份旧路径后覆盖
+bash install/install-hooks.sh --doctor  # 检查 dispatcher 完整性
 ```
 
 验证：
 
 ```bash
 git config --global core.hooksPath
-# 期望: /home/<user>/.config/git/hooks
+# 期望: /home/<user>/.config/privacy-filter/git-hooks
 ```
 
 #### 5b. 指定仓库 Hooks
@@ -374,10 +375,10 @@ curl -fsS http://192.168.88.75:8765/health | jq .
 ```bash
 git clone git@github.com:shiliai/privacy-filter-service.git ~/project/docker/privacy-filter-service
 cd ~/project/docker/privacy-filter-service
-bash install/install-hooks.sh          # 全局；或按路径 A 的"步骤 5b"复制到指定仓库
+bash install/install-hooks.sh          # 推荐的全局受管安装
 ```
 
-脚本会把 `pre-commit`、`commit-msg`、`_lib.sh`、`pf_fallback.py` 一起装到 `~/.config/git/hooks/`。
+脚本会把 dispatcher、OPF hooks、`_lib.sh`、`pf_fallback.py` 一起装到 `~/.config/privacy-filter/git-hooks/`，并把原 hooksPath 保存为 delegate。
 
 > `install-hooks.sh` 已兼容 macOS 自带的 bash 3.2（不使用 `mapfile` / `declare -A` 等 4.0+ 语法，也不依赖 GNU `head -z`）。
 
@@ -483,13 +484,13 @@ git log --oneline -1
 grep -nE 'AIza|sk_live' hooks/pf_fallback.py    # 例：确认新的 secret 规则已存在
 ```
 
-### 2. 重装 hooks（覆盖为新版）
+### 2. 重装或修复受管 hooks
 
 ```bash
 bash install/install-hooks.sh        # 全局；或按「部署路径 A 步骤 5b」重装到指定仓库
 ```
 
-`core.hooksPath` 已指向同一目录时，脚本原地覆盖更新。主引擎地址若已用 `git config privacyfilter.url` 设置，**不受重装影响**（存于 git config，非仓库文件）。
+`core.hooksPath` 已指向受管目录时，脚本会校验 ownership state 后修复缺失或损坏的 managed 文件。它不会改写 mutable delegate 内容。主引擎地址若已用 `git config privacyfilter.url` 设置，**不受重装影响**。
 
 ### 3. 升级本机 GPU 服务端（仅 Track 1b）
 
@@ -555,11 +556,11 @@ nvidia-smi
 
 ### Q: 全局 hooks 与 Husky/Lefthook 冲突
 
-全局 `core.hooksPath` 会覆盖仓库级别的 hooks。解决方案：
+安装器只会自动组合**安装时已配置的全局 hooksPath**。之后安装的工具不会被自动组合；若它无法写入锁定的 managed root，应把生成的 hook 安装/恢复到 doctor 输出的 delegate 路径。仓库本地/worktree `core.hooksPath` 仍可绕过全局配置，doctor 会报告但无法阻止。
 
-1. **使用指定仓库安装**（部署路径 5b）代替全局安装
-2. 或在受影响仓库中 `PRIVACY_FILTER_SKIP=1 git commit`
-3. 或使用 `install/install-hooks.sh --force` 备份旧 hooks 后切换
+1. 运行 `install/install-hooks.sh --doctor` 确认 dispatcher、delegate 目录与预期 hook 均存在
+2. 将后装工具的 hook 放到已保存的 delegate 路径，再用干净提交验证 OPF 与该工具都执行
+3. 不要用仓库本地 `core.hooksPath` 作为组合方案；它会绕过全局 OPF
 
 ### Q: 服务不可用时，提交会怎样？
 
@@ -588,13 +589,15 @@ git restore --staged <file>  # 取消暂存
 ```bash
 cd ~/project/docker/privacy-filter-service
 bash install/uninstall.sh
+# 仅回滚 hooks、保持服务运行：
+bash install/uninstall.sh --hooks-only
 ```
 
 卸载操作：
 - 停止并禁用 systemd 服务
 - 删除 systemd unit 文件
-- 清除 `core.hooksPath`（仅当指向我们的目录时）
-- 删除 hooks 文件
+- 恢复安装前的全局 `core.hooksPath`（仅当仍指向受管目录时）
+- 删除受管 hooks 文件；原 delegate 文件不删除
 - **保留** `~/.config/privacy-filter/config.toml` 和 `env`
 
 ---

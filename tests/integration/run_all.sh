@@ -24,6 +24,8 @@ tests=(
   test_skip_env.sh
   test_no_verify.sh
   test_concurrent.sh
+  test_hook_integrity.sh
+  test_hook_paths_repair.sh
 )
 
 declare -a temp_roots=()

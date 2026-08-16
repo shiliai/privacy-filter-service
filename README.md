@@ -312,12 +312,20 @@ journalctl --user -u privacy-filter -n 50
 - **CPU 配置过大** — `device = "cpu"` 时必须设置 `max_file_bytes <= 1024`
 - **配置文件不存在** — 重新运行 `install/install-service.sh`
 
-### Hook 冲突
+### Hook 完整性与冲突
 
-如果某些仓库已使用 Husky、pre-commit 或 Lefthook，全局 `core.hooksPath` 会覆盖它们的 hooks。解决方案:
+`install/install-hooks.sh` 使用独立的 `~/.config/privacy-filter/git-hooks` 作为全局 dispatcher root。OPF 始终先执行，随后按原退出码执行安装前 `core.hooksPath` 中的同名 hook（Lefthook、Husky 或 pre-commit）。如果 delegate 改变 staged tree 或 commit message，dispatcher 会再运行一次 OPF。原目录不会被覆盖。安装后 dispatcher root 为只读/可执行，普通 postinstall 对该目录的写入会失败而不是静默替换 OPF。后装工具不会自动加入组合；应把它的 hook 安装或恢复到 state/doctor 显示的 delegate 路径，再用干净提交验证两者执行。
 
 ```bash
-install/install-hooks.sh --force   # 备份旧路径并切换
+bash install/install-hooks.sh --doctor
+```
+
+doctor 会检查有效的（包含仓库本地/worktree 配置）`core.hooksPath`、文件校验和及目录权限。重装可修复受损 dispatcher；卸载会恢复先前的全局 hooksPath，且不会删除原 hook 目录。
+
+这不是特权安全边界：`git commit --no-verify`、仓库本地 `core.hooksPath`，或能够 `chmod` 该目录的同一用户仍可绕过 hook。应将 doctor 纳入主机巡检。
+
+```bash
+install/install-hooks.sh --doctor  # 检查 dispatcher 未被绕过或修改
 PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
 ```
 
@@ -373,9 +381,11 @@ OPF_CHECKPOINT=/mnt/LLM/OpenAI/privacy_filter \
 
 ```bash
 bash install/uninstall.sh
+# 仅回滚 hooks，保持 privacy-filter 服务运行
+bash install/uninstall.sh --hooks-only
 ```
 
-停止服务、删除 unit 文件、取消 `core.hooksPath`、删除 hooks。保留 `~/.config/privacy-filter/config.toml` 和 `env`。
+完整卸载会停止服务、删除 unit，并恢复安装前的全局 `core.hooksPath`；`--hooks-only` 只恢复 hook 配置和受管文件。两者都保留原 delegate 目录、`config.toml` 和 `env`。
 
 ---
 

@@ -16,28 +16,26 @@ The service is currently running on `M2S2VMUbuntuA6000` (internal network) with 
 
 ## Quick Setup
 
-### 1. Copy the Hooks to Your Machine
+### 1. Install the Managed Hooks
 
-The hooks live in the service repository. You only need three files:
+The dispatcher and its support files are installed together from the service repository:
 
 ```bash
-# On the remote host (or from the repo)
-scp user@M2S2VMUbuntuA6000:/home/shili-dev/project/privacy-filter-service/hooks/_lib.sh ~/.config/git/hooks/
-scp user@M2S2VMUbuntuA6000:/home/shili-dev/project/privacy-filter-service/hooks/pre-commit ~/.config/git/hooks/
-scp user@M2S2VMUbuntuA6000:/home/shili-dev/project/privacy-filter-service/hooks/commit-msg ~/.config/git/hooks/
-
-# Make them executable
-chmod +x ~/.config/git/hooks/_lib.sh ~/.config/git/hooks/pre-commit ~/.config/git/hooks/commit-msg
+# From a checked-out privacy-filter-service repository
+bash install/install-hooks.sh
 ```
 
-If you prefer, clone the repository and copy the files from `hooks/`.
+The installer creates an OPF-owned dispatcher root, runs OPF before the prior
+global hook path, and locks the managed directory against ordinary postinstall
+overwrites. Check it after upgrades with `bash install/install-hooks.sh --doctor`.
 
 ### 2. Point Git Hooks at the Remote Service
 
-Tell git to use your hooks directory:
+The installer already points Git at its managed dispatcher root. Do not copy raw hook files or set `core.hooksPath` manually.
 
 ```bash
-git config --global core.hooksPath ~/.config/git/hooks
+# Verify the managed global path instead
+git config --global core.hooksPath
 ```
 
 Tell the hooks where the remote service lives. Replace `REMOTE_IP` with the actual IP or hostname.
@@ -74,7 +72,7 @@ Create a test repo and try a commit with fake PII:
 cd /tmp
 mkdir pf-test && cd pf-test
 git init
-git config core.hooksPath ~/.config/git/hooks   # if not global
+# The global installer configuration is used; do not add a local hooksPath override.
 echo "Contact <PRIVATE_EMAIL> or call <PRIVATE_PHONE>" > readme.txt
 git add readme.txt
 git commit -m "add contact info"
@@ -112,11 +110,11 @@ These variables control hook behavior. Set them in your shell or in `~/.bashrc`.
 
 | Variable | Default | What It Does |
 |----------|---------|--------------|
-| `PRIVACY_FILTER_URL` | `http://127.0.0.1:8765` | URL of the remote service. **This is the only variable you must change.** |
+| `PRIVACY_FILTER_URL` | *(empty)* | URL of the remote service. When empty, the deterministic local fallback is used. |
 | `PRIVACY_FILTER_TIMEOUT_S` | `5` | HTTP timeout in seconds (1 to 60). Increase if the remote host is slow or far away. |
 | `PRIVACY_FILTER_MAX_FILE_BYTES` | `262144` | Maximum file size the hook will scan, in bytes. The service itself rejects anything over 1 MB. |
 | `PRIVACY_FILTER_SKIP` | `0` | Set to `1` to skip all privacy-filter checks for a single commit. |
-| `PRIVACY_FILTER_MAX_INFLIGHT_WARNS` | `1` | Maximum "fail-open" warnings printed per 5-minute window. Prevents log spam when the service is unreachable. |
+| `PRIVACY_FILTER_FAIL_OPEN` | `0` | Explicitly allow a commit only when both primary and local fallback are unavailable. Default behavior blocks. |
 
 ### Example: Slow Network
 
@@ -185,7 +183,7 @@ The difference between the two:
 | `PRIVACY_FILTER_SKIP=1` | Single commit | Only privacy-filter hooks (pre-commit and commit-msg). Other hooks still run. |
 | `git commit --no-verify` | Single commit | **All** hooks (pre-commit, commit-msg, and any others installed by tools like Husky or pre-commit). |
 
-Use `PRIVACY_FILTER_SKIP=1` when you want to bypass the privacy filter but still run other checks (linting, tests, etc.). Use `--no-verify` only when you need to skip every hook. Both are safe. The hooks are designed to fail open, so skipping them does not break anything.
+Use `PRIVACY_FILTER_SKIP=1` only for an explicit privacy-filter bypass while retaining delegated checks. `--no-verify` bypasses every hook. Both weaken commit-time protection and should be auditable exceptions.
 
 ### Option 3: Edit the File and Retry
 
@@ -251,7 +249,7 @@ Expected: `Email <PRIVATE_EMAIL> or call <PRIVATE_PHONE>`
 cd /tmp
 rm -rf pf-verify && mkdir pf-verify && cd pf-verify
 git init
-git config core.hooksPath ~/.config/git/hooks
+# The global installer configuration is used; do not add a local hooksPath override.
 echo "Contact <PRIVATE_EMAIL>" > contact.txt
 git add contact.txt
 git commit -m "add contact"
@@ -279,21 +277,21 @@ PRIVACY_FILTER_SKIP=1 git commit -m "skip test with <PRIVATE_EMAIL>"
 
 Expected: commit succeeds, no patch generated.
 
-### 7. Fail-open Works
+### 7. Local Fallback Works
 
 Temporarily break the URL and try to commit:
 
 ```bash
-PRIVACY_FILTER_URL="http://invalid:8765" git commit -m "fail open test"
+PRIVACY_FILTER_URL="http://invalid:8765" git commit -m "fallback test"
 ```
 
-Expected: warning printed, commit succeeds.
+Expected: a clean commit succeeds through the local fallback; deterministic secret-shaped content is still blocked.
 
 ---
 
 ## Troubleshooting
 
-### "service down, fail-open" Warning
+### "primary service unreachable, using local fallback" Warning
 
 The hook cannot reach the remote service. Check:
 
@@ -362,8 +360,8 @@ If you run the service across untrusted networks, use TLS end-to-end.
 
 ## Summary
 
-1. Copy the three hook files to `~/.config/git/hooks/`
-2. Set `git config --global core.hooksPath ~/.config/git/hooks`
+1. Run `bash install/install-hooks.sh` from the service repository
+2. Check `bash install/install-hooks.sh --doctor`
 3. Set `PRIVACY_FILTER_URL` to the remote service address
 4. Verify with `curl ${PRIVACY_FILTER_URL}/health`
 5. Commit as normal. If PII is detected, review the patch and apply it, or skip with `PRIVACY_FILTER_SKIP=1`
