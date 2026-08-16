@@ -28,8 +28,31 @@ info() { printf '[INFO]  %s\n' "$*"; }
 error() { printf '[ERROR] %s\n' "$*" >&2; }
 die() { error "$*"; exit 1; }
 checksum() { cksum < "$1" | awk '{print $1 ":" $2}'; }
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    die 'SHA-256 utility not found (need sha256sum or shasum)'
+  fi
+}
 is_dispatcher() { [ -f "$1" ] && grep -qF '# privacy-filter-dispatcher-v1' "$1"; }
-is_legacy_opf() { [ -f "$1" ] && grep -qF 'pf_select_engine' "$1" && grep -qF '_lib.sh' "$1"; }
+# Only archive exact, known OPF hook identities. Marker-based detection could
+# delete a user wrapper that invokes OPF and then performs additional checks.
+# The two retired identities are the verified incident-era releases; keeping
+# hashes rather than their contents avoids reintroducing their source.
+is_legacy_opf() {
+  local file="$1" hook="${2:?hook name required}" identity
+  [ -f "$file" ] || return 1
+  cmp -s "$file" "$PROJECT_ROOT/hooks/$hook" && return 0
+  identity="$(sha256_file "$file")"
+  case "$hook:$identity" in
+    pre-commit:31eb638ad5444c5daad260af6f457f9248e136f8f3ecf0d41fd42f757ecbc669|commit-msg:9a6c7f7eeecd2e174868cd435a3a0c6882bd34e17ab487d069df1eae46013170) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+is_relative_hooks_path() { case "$1" in ''|/*|'~/'*) return 1 ;; *) return 0 ;; esac; }
 
 normalize_hooks_path() {
   local value="$1"
@@ -90,6 +113,7 @@ esac
 status=$?
 [ "$status" -eq 0 ] || exit "$status"
 delegate_dir="$(sed -n 's/^delegate_hooks_path=//p' "$hook_dir/.privacy-filter-hooks-state" | head -n 1)"
+[ -z "$delegate_dir" ] || [ "${delegate_dir#/}" != "$delegate_dir" ] || delegate_dir="$(git rev-parse --show-toplevel 2>/dev/null || true)/$delegate_dir"
 [ -n "$delegate_dir" ] && [ "$delegate_dir" != "$hook_dir" ] && [ -x "$delegate_dir/$hook_name" ] || exit 0
 "$delegate_dir/$hook_name" "$@"
 status=$?
@@ -105,8 +129,10 @@ EOF
 
 write_state() {
   local delegate="$1" file expected_pre=0 expected_msg=0
-  [ -n "$delegate" ] && [ -x "$delegate/pre-commit" ] && [ "$STAGED_LEGACY_PRE_COMMIT" != 1 ] && expected_pre=1
-  [ -n "$delegate" ] && [ -x "$delegate/commit-msg" ] && [ "$STAGED_LEGACY_COMMIT_MSG" != 1 ] && expected_msg=1
+  if ! is_relative_hooks_path "$delegate"; then
+    [ -n "$delegate" ] && [ -x "$delegate/pre-commit" ] && [ "$STAGED_LEGACY_PRE_COMMIT" != 1 ] && expected_pre=1
+    [ -n "$delegate" ] && [ -x "$delegate/commit-msg" ] && [ "$STAGED_LEGACY_COMMIT_MSG" != 1 ] && expected_msg=1
+  fi
   umask 077
   {
     printf 'version=3\n'
@@ -131,7 +157,7 @@ migrate_legacy_opf() {
   mkdir -p "$TARGET_HOOKS_DIR/legacy-backup"
   source="$prior/pre-commit"
   backup="$TARGET_HOOKS_DIR/legacy-backup/pre-commit"
-  if [ ! -e "$backup" ] && is_legacy_opf "$source"; then
+  if [ ! -e "$backup" ] && is_legacy_opf "$source" pre-commit; then
     cp -p "$source" "$backup"
     MIGRATED_LEGACY_PRE_COMMIT=1
     STAGED_LEGACY_PRE_COMMIT=1
@@ -139,7 +165,7 @@ migrate_legacy_opf() {
   fi
   source="$prior/pre-commit.old"
   backup="$TARGET_HOOKS_DIR/legacy-backup/pre-commit.old"
-  if [ ! -e "$backup" ] && is_legacy_opf "$source"; then
+  if [ ! -e "$backup" ] && is_legacy_opf "$source" pre-commit; then
     cp -p "$source" "$backup"
     MIGRATED_LEGACY_PRE_COMMIT_OLD=1
     STAGED_LEGACY_PRE_COMMIT_OLD=1
@@ -147,7 +173,7 @@ migrate_legacy_opf() {
   fi
   source="$prior/commit-msg"
   backup="$TARGET_HOOKS_DIR/legacy-backup/commit-msg"
-  if [ ! -e "$backup" ] && is_legacy_opf "$source"; then
+  if [ ! -e "$backup" ] && is_legacy_opf "$source" commit-msg; then
     cp -p "$source" "$backup"
     MIGRATED_LEGACY_COMMIT_MSG=1
     STAGED_LEGACY_COMMIT_MSG=1
@@ -161,14 +187,14 @@ commit_legacy_migration() {
   if [ "$STAGED_LEGACY_PRE_COMMIT" = 1 ]; then
     source="$prior/pre-commit"; backup="$TARGET_HOOKS_DIR/legacy-backup/pre-commit"
     [ -w "$prior" ] || die 'cannot safely archive legacy pre-commit: prior hooks directory is not writable'
-    is_legacy_opf "$source" && [ "$(checksum "$source")" = "$(checksum "$backup")" ] || die 'legacy pre-commit changed during installation; refusing removal'
+    is_legacy_opf "$source" pre-commit && [ "$(checksum "$source")" = "$(checksum "$backup")" ] || die 'legacy pre-commit changed during installation; refusing removal'
     rm -f "$source"
     REMOVED_LEGACY_PRE_COMMIT=1
   fi
   if [ "$STAGED_LEGACY_PRE_COMMIT_OLD" = 1 ]; then
     source="$prior/pre-commit.old"; backup="$TARGET_HOOKS_DIR/legacy-backup/pre-commit.old"
     [ -w "$prior" ] || die 'cannot safely archive legacy pre-commit.old: prior hooks directory is not writable'
-    is_legacy_opf "$source" && [ "$(checksum "$source")" = "$(checksum "$backup")" ] || die 'legacy pre-commit.old changed during installation; refusing removal'
+    is_legacy_opf "$source" pre-commit && [ "$(checksum "$source")" = "$(checksum "$backup")" ] || die 'legacy pre-commit.old changed during installation; refusing removal'
     rm -f "$source"
     REMOVED_LEGACY_PRE_COMMIT_OLD=1
   fi
@@ -176,7 +202,7 @@ commit_legacy_migration() {
   if [ "$STAGED_LEGACY_COMMIT_MSG" = 1 ]; then
     source="$prior/commit-msg"; backup="$TARGET_HOOKS_DIR/legacy-backup/commit-msg"
     [ -w "$prior" ] || die 'cannot safely archive legacy commit-msg: prior hooks directory is not writable'
-    is_legacy_opf "$source" && [ "$(checksum "$source")" = "$(checksum "$backup")" ] || die 'legacy commit-msg changed during installation; refusing removal'
+    is_legacy_opf "$source" commit-msg && [ "$(checksum "$source")" = "$(checksum "$backup")" ] || die 'legacy commit-msg changed during installation; refusing removal'
     rm -f "$source"
     REMOVED_LEGACY_COMMIT_MSG=1
   fi
@@ -264,26 +290,28 @@ doctor() {
   delegate="$(state_value delegate_hooks_path)"
   expected_pre="$(state_value delegate_pre_commit_expected)"
   expected_msg="$(state_value delegate_commit_msg_expected)"
-  if [ -n "$delegate" ]; then
+  # A relative delegate is resolved per repository by the dispatcher, so this
+  # host-level doctor cannot determine whether a particular repository has it.
+  if [ -n "$delegate" ] && ! is_relative_hooks_path "$delegate"; then
     [ -d "$delegate" ] || { error "delegate hooks directory is missing: $delegate"; failed=1; }
     [ "$expected_pre" != 1 ] || [ -x "$delegate/pre-commit" ] || { error "expected delegate hook is missing: $delegate/pre-commit"; failed=1; }
     [ "$expected_msg" != 1 ] || [ -x "$delegate/commit-msg" ] || { error "expected delegate hook is missing: $delegate/commit-msg"; failed=1; }
   fi
   if [ "$failed" -ne 0 ]; then error 'privacy-filter hook integrity FAILED; rerun install/install-hooks.sh to repair.'; return 1; fi
   info 'privacy-filter hook integrity OK'
+  info "delegate hooks path: ${delegate:-<none>}"
 }
 
 main() {
   parse_args "$@"
   if [ "$DOCTOR" = true ]; then doctor; return; fi
-  local prior configured configured_identity
+  local prior prior_state_value configured configured_identity
   configured="$(git config --global --get core.hooksPath 2>/dev/null || true)"
   configured_identity="$(normalize_hooks_path "$configured" 2>/dev/null || true)"
-  [ -z "$configured" ] || [ -n "$configured_identity" ] || die "existing global core.hooksPath is relative or unsafe: $configured"
-  prior="$configured_identity"
+  prior="${configured_identity:-$configured}"
   if [ "$configured_identity" = "$TARGET_HOOKS_DIR" ] && [ -f "$STATE_FILE" ]; then
-    prior="$(state_value delegate_hooks_path)"
-    prior="$(normalize_hooks_path "$prior" 2>/dev/null || true)"
+    prior_state_value="$(state_value delegate_hooks_path)"
+    prior="$(normalize_hooks_path "$prior_state_value" 2>/dev/null || printf '%s' "$prior_state_value")"
     MIGRATED_LEGACY_PRE_COMMIT="$(state_value legacy_pre_commit)"
     MIGRATED_LEGACY_PRE_COMMIT_OLD="$(state_value legacy_pre_commit_old)"
     MIGRATED_LEGACY_COMMIT_MSG="$(state_value legacy_commit_msg)"
@@ -298,7 +326,7 @@ main() {
   PRIOR_DELEGATE_PATH="$prior"
   validate_target_ownership
   unlock_root
-  migrate_legacy_opf "$prior"
+  if ! is_relative_hooks_path "$prior"; then migrate_legacy_opf "$prior"; fi
   if [ "${PRIVACY_FILTER_TEST_FAIL_AFTER_MIGRATION:-0}" = 1 ]; then
     rollback_staged_legacy
     die 'forced failure after legacy staging'

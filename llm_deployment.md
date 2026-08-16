@@ -46,6 +46,51 @@ git commit ─► Hook(pre-commit / commit-msg)
 > **安全设计**：远程服务不可达时，hook **不再**静默放行（旧版 fail-open 会让 PII 漏过）。
 > 现在自动切到本地非模型兜底；连兜底都没有时**默认阻断**提交（`PRIVACY_FILTER_FAIL_OPEN=1` 可显式放行）。
 
+## 三台主机的受控自部署（仅在批准窗口执行）
+
+当前没有批准时，不执行任何主机部署。本节是批准后的固定 runbook：按 `host-a`（canary）→ `host-b` → `host-c` 顺序，所有主机使用同一个已审查 revision；任一停止条件命中就停止推进。
+
+每台主机先备份全局 hook 配置、state 和当前 revision：
+
+```bash
+prior_revision="$(git rev-parse HEAD)"
+git status --short
+git rev-parse HEAD > ~/.config/privacy-filter/previous-revision
+git config --global --get core.hooksPath > ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true
+cp ~/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state ~/.config/privacy-filter/hooks-state.backup 2>/dev/null || true
+```
+
+然后检出批准 revision，安装并验证服务和 dispatcher：
+
+```bash
+git checkout <approved-revision>
+bash install/install-service.sh
+bash install/install-hooks.sh
+curl -fsS http://127.0.0.1:8765/health
+bash install/install-hooks.sh --doctor
+```
+
+在临时仓库执行不产生提交的 secret smoke；提交必须失败且 `HEAD` 不存在：
+
+```bash
+smoke_dir="$(mktemp -d)"; git -C "$smoke_dir" init
+git -C "$smoke_dir" config user.name smoke; git -C "$smoke_dir" config user.email smoke@example.invalid
+printf 'token = "AKIAFAKEFAKEFAKEFAKE"\n' > "$smoke_dir/secret.txt"; git -C "$smoke_dir" add secret.txt  # fake fixture
+! git -C "$smoke_dir" commit -m 'secret smoke'
+! git -C "$smoke_dir" rev-parse --verify HEAD
+rm -rf "$smoke_dir"
+```
+
+停止条件：health/doctor 失败、secret smoke 创建提交、delegate 未按 doctor 输出运行、或出现预期外文件修改。停止后仅在当前主机执行：
+
+```bash
+bash install/uninstall.sh --hooks-only
+test "$(git config --global --get core.hooksPath 2>/dev/null || true)" = "$(cat ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true)"
+git checkout "$(cat ~/.config/privacy-filter/previous-revision)"
+```
+
+确认 hooks-only 回退成功、hooksPath 已恢复且外部 backup/state 副本保留后，才允许排查；只有 canary 全部通过才推进下一台。
+
 ---
 
 ## 前置确认（MUST ASK FIRST）

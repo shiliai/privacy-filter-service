@@ -38,25 +38,30 @@ uninstall_service() {
   if [ -f "$UNIT_FILE" ]; then rm -f "$UNIT_FILE"; systemctl --user daemon-reload || true; fi
 }
 uninstall_hooks() {
-  local current prior file legacy
+  local current prior file legacy conflict=0
   [ -f "$STATE_FILE" ] || { warn 'No privacy-filter ownership state; leaving hooks and git configuration unchanged'; return; }
   prior="$(state_value delegate_hooks_path)"
   current="$(git config --global --get core.hooksPath 2>/dev/null || true)"
-  if [ "$(normalize_hooks_path "$current" 2>/dev/null || true)" = "$HOOKS_DIR" ]; then
-    if [ -n "$prior" ]; then git config --global core.hooksPath "$prior"; else git config --global --unset core.hooksPath || true; fi
-    ok 'core.hooksPath restored'
-  else
-    warn "global core.hooksPath changed to '$current'; leaving it unchanged"
+  if [ -n "$prior" ] && [ -d "$prior" ]; then
+    for legacy in pre-commit pre-commit.old commit-msg; do
+      if [ -f "$HOOKS_DIR/legacy-backup/$legacy" ] && [ -e "$prior/$legacy" ]; then
+        warn "not restoring legacy $legacy: destination exists; recover from $HOOKS_DIR/legacy-backup/$legacy"
+        conflict=1
+      fi
+    done
   fi
+  [ "$conflict" -eq 0 ] || return 1
+  if [ "$(normalize_hooks_path "$current" 2>/dev/null || true)" != "$HOOKS_DIR" ]; then
+    warn "global core.hooksPath changed to '$current'; leaving it unchanged"
+    return 1
+  fi
+  if [ -n "$prior" ]; then git config --global core.hooksPath "$prior"; else git config --global --unset core.hooksPath || true; fi
+  ok 'core.hooksPath restored'
   chmod 700 "$HOOKS_DIR"
   if [ -n "$prior" ] && [ -d "$prior" ]; then
     for legacy in pre-commit pre-commit.old commit-msg; do
       if [ -f "$HOOKS_DIR/legacy-backup/$legacy" ]; then
-        if [ -e "$prior/$legacy" ]; then
-          warn "not restoring legacy $legacy: destination exists; recover from $HOOKS_DIR/legacy-backup/$legacy"
-        else
-          mv "$HOOKS_DIR/legacy-backup/$legacy" "$prior/$legacy"
-        fi
+        mv "$HOOKS_DIR/legacy-backup/$legacy" "$prior/$legacy"
       fi
     done
   fi

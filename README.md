@@ -320,7 +320,7 @@ journalctl --user -u privacy-filter -n 50
 bash install/install-hooks.sh --doctor
 ```
 
-doctor 会检查有效的（包含仓库本地/worktree 配置）`core.hooksPath`、文件校验和及目录权限。重装可修复受损 dispatcher；卸载会恢复先前的全局 hooksPath，且不会删除原 hook 目录。
+doctor 会检查有效的（包含仓库本地/worktree 配置）`core.hooksPath`、文件校验和及目录权限，并输出当前 delegate 路径。重装可修复受损 dispatcher；卸载会恢复先前的全局 hooksPath，且不会删除原 hook 目录。相对 delegate 按每个仓库根目录解析，因此 host 级 doctor 只能报告该路径，不能断言每个仓库都存在它。
 
 这不是特权安全边界：`git commit --no-verify`、仓库本地 `core.hooksPath`，或能够 `chmod` 该目录的同一用户仍可绕过 hook。应将 doctor 纳入主机巡检。
 
@@ -329,9 +329,55 @@ install/install-hooks.sh --doctor  # 检查 dispatcher 未被绕过或修改
 PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
 ```
 
-### Fail-open 警告
+### 三台主机的受控自部署
 
-服务不可用时，hook 打印警告并放行提交。这是设计行为，不会阻塞你的工作。检查 `journalctl` 了解原因。
+以下流程只适用于已获准的维护窗口；它不是自动部署指令。当前未部署时，先保留每台主机的现状。按 `host-a`（canary）→ `host-b` → `host-c` 的顺序执行，任何一步的停止条件触发时，不再继续下一台。
+
+1. 在每台主机开始前记录并固定回退 revision，并备份现有 hook 配置和受管 state：
+
+   ```bash
+   prior_revision="$(git rev-parse HEAD)"
+   git status --short
+   git rev-parse HEAD > ~/.config/privacy-filter/previous-revision
+   git config --global --get core.hooksPath > ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true
+   cp ~/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state ~/.config/privacy-filter/hooks-state.backup 2>/dev/null || true
+   ```
+
+2. 检出经审查的 revision，运行服务和 hooks 安装，再逐项验证：
+
+   ```bash
+   git checkout <approved-revision>
+   bash install/install-service.sh
+   bash install/install-hooks.sh
+   curl -fsS http://127.0.0.1:8765/health
+   bash install/install-hooks.sh --doctor
+   ```
+
+3. 在临时仓库做不产生提交的 secret smoke。下面的提交必须被阻止，随后检查 `HEAD` 仍不存在：
+
+   ```bash
+   smoke_dir="$(mktemp -d)"; git -C "$smoke_dir" init
+   git -C "$smoke_dir" config user.name smoke; git -C "$smoke_dir" config user.email smoke@example.invalid
+   printf 'token = "AKIAFAKEFAKEFAKEFAKE"\n' > "$smoke_dir/secret.txt"  # fake fixture
+   git -C "$smoke_dir" add secret.txt
+   ! git -C "$smoke_dir" commit -m 'secret smoke'
+   ! git -C "$smoke_dir" rev-parse --verify HEAD
+   rm -rf "$smoke_dir"
+   ```
+
+停止条件：health 或 doctor 失败、secret smoke 创建了提交、delegate 未按 doctor 输出运行、或安装修改了未预期文件。发生时立即停止后续主机，并在当前主机执行已验证的 hooks-only 回退：
+
+```bash
+bash install/uninstall.sh --hooks-only
+test "$(git config --global --get core.hooksPath 2>/dev/null || true)" = "$(cat ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true)"
+git checkout "$(cat ~/.config/privacy-filter/previous-revision)"
+```
+
+回退后确认 hooks-only 命令返回成功、全局 hooksPath 已恢复，并保留上面创建的外部 backup/state 副本供排查。只有 canary 的全部检查通过，才按同一 pinned revision 推进到下一台主机。
+
+### 服务不可用
+
+服务不可用时，hook 默认使用本地 fallback 并 fail-closed，不会静默放行未验证的提交。只有显式设置 `PRIVACY_FILTER_FAIL_OPEN=1` 才会允许未脱敏提交；`PRIVACY_FILTER_SKIP=1` 是另一种显式绕过。检查 `journalctl` 了解原因。
 
 ### Partial staging 错误
 

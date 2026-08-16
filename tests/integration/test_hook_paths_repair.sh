@@ -3,6 +3,7 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 pfit_init hook-paths-repair
+
 managed_parent="$HOME/managed-parent"
 managed="$managed_parent/hooks"
 delegate="$HOME/delegate-hooks"
@@ -17,21 +18,24 @@ if PRIVACY_FILTER_HOOKS_DIR='relative-hooks' bash "$ROOT_DIR/install/install-hoo
 fi
 [ ! -e "$ROOT_DIR/relative-hooks" ]
 
-# Normal legacy installation: active OPF hooks are archived, not delegated.
+# An unmodified legacy OPF hook is archived, but custom wrapper behavior is
+# retained as the delegate.
 cp "$HOOKS_DIR/pre-commit" "$delegate/pre-commit"
 cp "$HOOKS_DIR/commit-msg" "$delegate/commit-msg"
 cp "$HOOKS_DIR/_lib.sh" "$delegate/_lib.sh"
 cp "$HOOKS_DIR/pf_fallback.py" "$delegate/pf_fallback.py"
-sed -i '2i printf '\''legacy-pre-commit-ran\\n'\'' >> "$PF_LEGACY_LOG"' "$delegate/pre-commit"
+sed '2i\
+printf '\''legacy-pre-commit-ran\\n'\'' >> "$PF_LEGACY_LOG"' "$delegate/pre-commit" > "$delegate/pre-commit.tmp"
+mv "$delegate/pre-commit.tmp" "$delegate/pre-commit"
 chmod 755 "$delegate/pre-commit" "$delegate/commit-msg" "$delegate/_lib.sh" "$delegate/pf_fallback.py"
 git config --global core.hooksPath '~/delegate-hooks/'
 
 PRIVACY_FILTER_HOOKS_DIR="$managed_parent/../managed-parent/hooks" PF_LEGACY_LOG="$legacy_log" bash "$ROOT_DIR/install/install-hooks.sh"
 [ "$(git config --global --get core.hooksPath)" = "$managed" ]
 grep -qF "delegate_hooks_path=$delegate" "$managed/.privacy-filter-hooks-state"
-[ ! -e "$delegate/pre-commit" ]
+[ -e "$delegate/pre-commit" ]
 [ ! -e "$delegate/commit-msg" ]
-[ -f "$managed/legacy-backup/pre-commit" ]
+[ ! -f "$managed/legacy-backup/pre-commit" ]
 [ -f "$managed/legacy-backup/commit-msg" ]
 
 repo="$PF_IT_ROOT/repo"
@@ -42,7 +46,7 @@ git -C "$repo" config user.email 'test@example.com'
 printf 'safe = true\n' > "$repo/clean.txt"
 git -C "$repo" add clean.txt
 PF_LEGACY_LOG="$legacy_log" git -C "$repo" commit -m 'single opf path' >/dev/null
-[ ! -e "$legacy_log" ]
+grep -qFx 'legacy-pre-commit-ran' "$legacy_log"
 
 # A later tool cannot overwrite the locked root. Its documented integration
 # path is the preserved delegate directory, where a clean commit runs it.
@@ -60,6 +64,67 @@ printf 'safe = "delegate"\n' > "$repo/delegate.txt"
 git -C "$repo" add delegate.txt
 PF_DELEGATE_LOG="$delegate_log" git -C "$repo" commit -m 'foreign delegate' >/dev/null
 grep -qFx 'foreign-tool-ran' "$delegate_log"
+
+# A v2 install may have preserved a relative delegate. Upgrading must retain
+# it and resolve it from the repository root when the dispatcher runs.
+v3_state="$PF_IT_ROOT/v3-hooks-state"
+cp "$managed/.privacy-filter-hooks-state" "$v3_state"
+chmod u+w "$managed/.privacy-filter-hooks-state"
+sed -e 's/^version=3$/version=2/' -e 's|^delegate_hooks_path=.*$|delegate_hooks_path=.githooks|' "$v3_state" > "$managed/.privacy-filter-hooks-state"
+chmod 444 "$managed/.privacy-filter-hooks-state"
+PRIVACY_FILTER_HOOKS_DIR="$managed" bash "$ROOT_DIR/install/install-hooks.sh"
+grep -qF 'delegate_hooks_path=.githooks' "$managed/.privacy-filter-hooks-state"
+[ "$(git config --global --get core.hooksPath)" = "$managed" ]
+mkdir -p "$repo/.githooks"
+cat > "$repo/.githooks/pre-commit" <<'EOF'
+#!/usr/bin/env bash
+printf 'relative-delegate-ran\n' >> "$PF_DELEGATE_LOG"
+EOF
+chmod 755 "$repo/.githooks/pre-commit"
+printf 'safe = "relative delegate"\n' > "$repo/relative-delegate.txt"
+git -C "$repo" add relative-delegate.txt
+PF_DELEGATE_LOG="$delegate_log" git -C "$repo" commit -m 'relative delegate' >/dev/null
+grep -qFx 'relative-delegate-ran' "$delegate_log"
+chmod u+w "$managed/.privacy-filter-hooks-state"
+cp "$v3_state" "$managed/.privacy-filter-hooks-state"
+chmod 444 "$managed/.privacy-filter-hooks-state"
+
+# A fresh install also preserves a Git-supported relative global hooks path.
+relative_managed="$HOME/relative-managed-hooks"
+git config --global core.hooksPath '.githooks'
+PRIVACY_FILTER_HOOKS_DIR="$relative_managed" bash "$ROOT_DIR/install/install-hooks.sh"
+grep -qF 'delegate_hooks_path=.githooks' "$relative_managed/.privacy-filter-hooks-state"
+[ "$(git config --global --get core.hooksPath)" = "$relative_managed" ]
+PRIVACY_FILTER_HOOKS_DIR="$relative_managed" bash "$ROOT_DIR/install/uninstall.sh" --hooks-only
+git config --global core.hooksPath "$managed"
+
+# The real incident-era hook identities migrate, while the adjacent custom
+# wrapper coverage above proves marker matches alone are insufficient.
+incident_delegate="$HOME/incident-delegate"
+incident_managed="$HOME/incident-managed-hooks"
+incident_hash_bin="$PF_IT_ROOT/incident-hash-bin"
+system_sha256sum="$(command -v sha256sum)"
+mkdir -p "$incident_delegate" "$incident_hash_bin"
+printf '#!/usr/bin/env bash\n# fake incident pre-commit fixture\nexit 0\n' > "$incident_delegate/pre-commit"
+printf '#!/usr/bin/env bash\n# fake incident commit-msg fixture\nexit 0\n' > "$incident_delegate/commit-msg"
+cat > "$incident_hash_bin/sha256sum" <<'EOF'
+#!/usr/bin/env bash
+case "${1##*/}" in
+  pre-commit) printf '%s  %s\n' '31eb638ad5444c5daad260af6f457f9248e136f8f3ecf0d41fd42f757ecbc669' "$1" ;;
+  commit-msg) printf '%s  %s\n' '9a6c7f7eeecd2e174868cd435a3a0c6882bd34e17ab487d069df1eae46013170' "$1" ;;
+  *) exec "$PF_SYSTEM_SHA256SUM" "$@" ;;
+esac
+EOF
+chmod 755 "$incident_hash_bin/sha256sum"
+chmod 755 "$incident_delegate/pre-commit" "$incident_delegate/commit-msg"
+git config --global core.hooksPath "$incident_delegate"
+PATH="$incident_hash_bin:$PATH" PF_SYSTEM_SHA256SUM="$system_sha256sum" PRIVACY_FILTER_HOOKS_DIR="$incident_managed" bash "$ROOT_DIR/install/install-hooks.sh"
+[ ! -e "$incident_delegate/pre-commit" ]
+[ ! -e "$incident_delegate/commit-msg" ]
+[ -f "$incident_managed/legacy-backup/pre-commit" ]
+[ -f "$incident_managed/legacy-backup/commit-msg" ]
+PRIVACY_FILTER_HOOKS_DIR="$incident_managed" bash "$ROOT_DIR/install/uninstall.sh" --hooks-only
+git config --global core.hooksPath "$managed"
 
 # Reinstall records expected mutable delegate hooks without hashing contents.
 PRIVACY_FILTER_HOOKS_DIR="$managed" bash "$ROOT_DIR/install/install-hooks.sh"
@@ -118,6 +183,14 @@ exit 0
 EOF
 chmod 755 "$mock_bin/systemctl"
 systemctl_log="$PF_IT_ROOT/systemctl.log"
+git config --global core.hooksPath "$HOME/conflicting-hooks"
+if PATH="$mock_bin:$PATH" PF_SYSTEMCTL_LOG="$systemctl_log" PRIVACY_FILTER_HOOKS_DIR="$managed" bash "$ROOT_DIR/install/uninstall.sh" --hooks-only >/dev/null 2>&1; then
+  echo 'expected uninstall to stop on a global hooksPath conflict' >&2
+  exit 1
+fi
+[ -f "$managed/.privacy-filter-hooks-state" ]
+[ "$(git config --global --get core.hooksPath)" = "$HOME/conflicting-hooks" ]
+git config --global core.hooksPath "$managed"
 PATH="$mock_bin:$PATH" PF_SYSTEMCTL_LOG="$systemctl_log" PRIVACY_FILTER_HOOKS_DIR="$managed" bash "$ROOT_DIR/install/uninstall.sh" --hooks-only
 [ ! -e "$systemctl_log" ]
 [ "$(git config --global --get core.hooksPath)" = "$delegate" ]

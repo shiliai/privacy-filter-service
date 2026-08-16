@@ -146,13 +146,20 @@ PRIVACY_FILTER_HOOKS_DIR="$opf_hooks" bash "$ROOT_DIR/install/install-hooks.sh" 
 
 printf 'new precommit old\n' > "$prior_hooks/pre-commit.old"
 printf 'new commit message hook\n' > "$prior_hooks/commit-msg"
-PRIVACY_FILTER_HOOKS_DIR="$opf_hooks" bash "$ROOT_DIR/install/uninstall.sh" 2>"$PF_IT_ROOT/uninstall.stderr"
-[ "$(git config --global --get core.hooksPath)" = "$prior_hooks" ]
+if PRIVACY_FILTER_HOOKS_DIR="$opf_hooks" bash "$ROOT_DIR/install/uninstall.sh" 2>"$PF_IT_ROOT/uninstall.stderr"; then
+  echo 'expected uninstall to stop before overwriting legacy destinations' >&2
+  exit 1
+fi
+[ "$(git config --global --get core.hooksPath)" = "$opf_hooks" ]
+[ -f "$opf_hooks/.privacy-filter-hooks-state" ]
 [ "$(cat "$prior_hooks/pre-commit.old")" = 'new precommit old' ]
 [ "$(cat "$prior_hooks/commit-msg")" = 'new commit message hook' ]
 [ -f "$opf_hooks/legacy-backup/pre-commit.old" ]
 [ -f "$opf_hooks/legacy-backup/commit-msg" ]
 grep -qF 'not restoring legacy' "$PF_IT_ROOT/uninstall.stderr"
+rm "$prior_hooks/pre-commit.old" "$prior_hooks/commit-msg"
+PRIVACY_FILTER_HOOKS_DIR="$opf_hooks" bash "$ROOT_DIR/install/uninstall.sh"
+[ "$(git config --global --get core.hooksPath)" = "$prior_hooks" ]
 [ -x "$prior_hooks/pre-commit" ]
 
 echo 'PASS test_hook_integrity'
