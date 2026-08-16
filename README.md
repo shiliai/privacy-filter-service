@@ -337,7 +337,10 @@ PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
 
    ```bash
    prior_revision="$(git rev-parse HEAD)"
-   test -z "$(git status --porcelain)"  # 不干净则立即停止
+   if [ -n "$(git status --porcelain)" ]; then
+     printf 'ERROR: worktree is not clean; stopping hooks rollout\n' >&2
+     exit 1
+   fi
    git rev-parse HEAD > ~/.config/privacy-filter/previous-revision
    git config --global --get core.hooksPath > ~/.config/privacy-filter/previous-hooks-path 2>/dev/null || true
    cp ~/.config/privacy-filter/git-hooks/.privacy-filter-hooks-state ~/.config/privacy-filter/hooks-state.backup 2>/dev/null || true
@@ -354,13 +357,34 @@ PRIVACY_FILTER_SKIP=1 git commit   # 在那些仓库跳过 privacy-filter
 3. 在临时仓库做不产生提交的 secret smoke。下面的提交必须被阻止，随后检查 `HEAD` 仍不存在：
 
    ```bash
-   smoke_dir="$(mktemp -d)"; git -C "$smoke_dir" init
-   git -C "$smoke_dir" config user.name smoke; git -C "$smoke_dir" config user.email smoke@example.invalid
-   printf 'token = "AKIAFAKEFAKEFAKEFAKE"\n' > "$smoke_dir/secret.txt"  # fake fixture
-   git -C "$smoke_dir" add secret.txt
-   ! git -C "$smoke_dir" commit -m 'secret smoke'
-   ! git -C "$smoke_dir" rev-parse --verify HEAD
-   rm -rf "$smoke_dir"
+   (
+     set -euo pipefail
+     smoke_dir="$(mktemp -d)"
+     trap 'rm -rf "$smoke_dir"' EXIT
+     smoke_log="$smoke_dir/commit.log"
+     git -C "$smoke_dir" init
+     git -C "$smoke_dir" config user.name smoke
+     git -C "$smoke_dir" config user.email smoke@example.invalid
+     printf 'token = "AKIAFAKEFAKEFAKEFAKE"\n' > "$smoke_dir/secret.txt"  # fake fixture
+     git -C "$smoke_dir" add secret.txt
+     if git -C "$smoke_dir" commit -m 'secret smoke' >"$smoke_log" 2>&1; then
+       printf 'ERROR: privacy-filter allowed the fake secret smoke\n' >&2
+       exit 1
+     fi
+     if ! grep -qF '[privacy-filter] blocked commit: detected PII' "$smoke_log"; then
+       cat "$smoke_log" >&2
+       printf 'ERROR: commit failed without the privacy-filter PII block marker\n' >&2
+       exit 1
+     fi
+     if ! find "$smoke_dir/.git/privacy-filter" -type f -name 'redact-*.patch' -print -quit | grep -q .; then
+       printf 'ERROR: privacy-filter did not generate a redaction patch\n' >&2
+       exit 1
+     fi
+     if git -C "$smoke_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+       printf 'ERROR: secret smoke unexpectedly created HEAD\n' >&2
+       exit 1
+     fi
+   )
    ```
 
 停止条件：clean-worktree 断言或 doctor 失败、secret smoke 创建了提交、delegate 未按 doctor 输出运行、或 hooks 安装修改了未预期文件。发生时立即停止后续主机，并在当前主机执行已验证的 hooks-only 回退：
